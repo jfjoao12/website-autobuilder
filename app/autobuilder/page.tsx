@@ -1,20 +1,30 @@
 // /app/autobuilder/page.tsx
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { callAi } from "../lib/ollama";
 
-type Plan = {
-    site_title?: string;
-    pages: { id: string; title: string; purpose?: string }[];
-};
-
-type BuiltPage = {
+type Plan = { site_title?: string; pages: { id: string; title: string; purpose?: string }[]; };
+type PagePlan = {
     id: string;
     title: string;
-    html: string;         // self-contained HTML (inline CSS & JS)
-    valid: boolean;
-    issues: string[];
+    outline: string[];
+    components?: string[];
+    copy_points?: string[];
+    interactions?: string[];
+    seo?: { title?: string; description?: string; keywords?: string[] };
+};
+type BuiltPage = { id: string; title: string; html: string; valid: boolean; issues: string[]; thinking: string[]; };
+type SharedLayout = { header: string; footer: string; siteTitle?: string; thinking: string[]; };
+
+type LiveStreamPhase = "plan" | "layout" | "page";
+type LiveStreamState = {
+    phase: LiveStreamPhase;
+    label: string;
+    raw: string;
+    cleaned: string;
+    thoughts: string[];
+    history: { id: string; text: string; timestamp: number }[];
 };
 
 const DEFAULT_PREPROMPT =
@@ -29,72 +39,108 @@ const DEFAULT_USER_PROMPT = `Build a minimal website for a small repair shop tha
 Tone: professional, friendly.
 Target pages: suggest a realistic set for this business.`;
 
-const VALIDATION_RULES = [
-    {
-        name: "Contains <html>",
-        check: (s: string) => /<html[\s>]/i.test(s),
-        issue: "Missing <html> tag.",
-    },
-    {
-        name: "Contains <head>",
-        check: (s: string) => /<head[\s>]/i.test(s),
-        issue: "Missing <head> tag.",
-    },
-    {
-        name: "Contains <body>",
-        check: (s: string) => /<body[\s>]/i.test(s),
-        issue: "Missing <body> tag.",
-    },
-    {
-        name: "Has <title>",
-        check: (s: string) => /<title>[^<]{1,100}<\/title>/i.test(s),
-        issue: "Missing <title> tag.",
-    },
+const STEPS = [
+    { title: "Framing the chrome", subtitle: "Generating unified header & footer", accent: "from-indigo-500 via-sky-500 to-emerald-400" },
+    { title: "Blueprinting the experience", subtitle: "Drafting a tailored site map", accent: "from-blue-500 via-sky-400 to-cyan-400" },
+    { title: "Crafting every pixel", subtitle: "Authoring page-level HTML", accent: "from-purple-500 via-fuchsia-400 to-rose-400" },
+    { title: "Shaping the delivery", subtitle: "Organising outputs and checks", accent: "from-amber-500 via-orange-400 to-rose-400" },
+    { title: "Proofing the build", subtitle: "Running validation passes", accent: "from-emerald-500 via-teal-400 to-sky-400" },
 ];
 
-export default function AutoBuilder() {
-    const [models, setModels] = useState<string[]>([]);
-    const [model, setModel] = useState<string>("");
-    const [prePrompt, setPrePrompt] = useState(DEFAULT_PREPROMPT);
-    const [userPrompt, setUserPrompt] = useState(DEFAULT_USER_PROMPT);
-    const [pageCount, setPageCount] = useState<number>(3);
-    const [status, setStatus] = useState<string>("");
-    const [plan, setPlan] = useState<Plan | null>(null);
-    const [pages, setPages] = useState<BuiltPage[]>([]);
-    const [activeId, setActiveId] = useState<string>("");
+const COMPLETE_CARD = { title: "All set to launch", subtitle: "Your custom site is compiled and ready", accent: "from-emerald-500 via-teal-400 to-sky-400" };
+const PANEL_CLASS = "rounded-2xl border border-slate-800/70 bg-slate-900/60 backdrop-blur";
 
-    const [busy, setBusy] = useState(false);
-    const iframeRef = useRef<HTMLIFrameElement | null>(null);
+/** Validation toggles */
+type RuleFlags = {
+    html: boolean;
+    head: boolean;
+    body: boolean;
+    title: boolean;
+    noExternalScript: boolean;
+};
 
-    // Load model list from local Ollama tags (via our API)
-    useEffect(() => {
-        (async () => {
-            try {
-                const r = await fetch("/api/ollama/tags");
-                const names: string[] = await r.json();
-                setModels(names);
-                setModel((prev) => prev || names[0] || "qwen3:8b");
-            } catch {
-                setModels([
-                    "qwen3:8b",
-                    "qwen2.5:7b-instruct",
-                    "qwen2.5:0.5b"
-                ]);
-                setModel((prev) => prev || "qwen3:8b");
-            }
-        })();
-    }, []);
+type ThinkingExtraction = { cleaned: string; thoughts: string[]; };
 
-    const log = (line: string) => setStatus((s) => s + (s ? "\n" : "") + line);
+const stripThinkingArtifacts = (input: string): ThinkingExtraction => {
+    const thoughts: string[] = [];
+    let working = input ?? "";
 
-    const resetAll = () => {
-        setPlan(null);
-        setPages([]);
-        setActiveId("");
-        setStatus("");
+    const collect = (_match: string, thought: string) => {
+        const trimmed = thought.trim();
+        if (trimmed) thoughts.push(trimmed);
+        return "";
     };
 
-    const buildPlanPrompt = (count: number) => `
+    // Capture thinking; remove from visible
+    working = working.replace(/<think>[\s\S]*?<\/think>/gi, (m) => collect(m, m.replace(/<\/?think>/gi, "")));
+    working = working.replace(/<!--\s*think[\s\S]*?-->/gi, (m) => collect(m, m.replace(/<!-+\s*think:?\s*/i, "").replace(/-+>/, "")));
+    working = working.replace(/(?:^|\n)\s*(Thought|Thinking|Reasoning)\s*:(.*)(?=\n|$)/gi, (m, label, rest) => collect(m, `${label}: ${rest}`));
+
+    // Remove fences but keep inner content
+    const fence = /```(?:json|html)?\s*([\s\S]*?)```/gi;
+    if (fence.test(working)) working = working.replace(fence, (_, inner) => `${inner}\n`);
+
+    return { cleaned: working.trim(), thoughts };
+};
+
+const extractJsonObject = (input: string): string => {
+    const { cleaned } = stripThinkingArtifacts(input);
+    const trimmed = cleaned.trim();
+    const noTicks = trimmed.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+    try { JSON.parse(noTicks); return noTicks; } catch { }
+    const first = noTicks.indexOf("{");
+    const last = noTicks.lastIndexOf("}");
+    if (first !== -1 && last !== -1 && last > first) {
+        const candidate = noTicks.slice(first, last + 1);
+        try { JSON.parse(candidate); return candidate; } catch { }
+    }
+    return noTicks;
+};
+
+// ---------- New prompts for per-page plan & fix ----------
+const buildPagePlanPrompt = (
+    siteTitle: string,
+    page: { id: string; title: string; purpose?: string },
+    allPages: { id: string; title: string }[],
+    brandContext: string,
+) => `
+You are planning a single web page for the site "${siteTitle}".
+
+Return ONLY JSON with shape:
+{
+  "id": string, "title": string,
+  "outline": string[],
+  "components": string[],
+  "copy_points": string[],
+  "interactions": string[],
+  "seo": { "title": string, "description": string, "keywords": string[] }
+}
+
+Guidance:
+- The page must serve this purpose: ${page.purpose || "N/A"}.
+- Navigation should include these pages: ${allPages.map(p => `${p.title} (${p.id}.html)`).join(", ")}.
+- Keep it minimal, accessible, and dark-friendly.
+- No lorem ipsum; specify realistic copy bullets (short).
+
+Brand/voice context:
+${brandContext}
+`;
+
+const buildFixPrompt = (siteTitle: string, pageTitle: string, issues: string[], html: string) => `
+You produced a self-contained HTML document for "${pageTitle}" on the site "${siteTitle}", but it failed validation.
+
+Issues:
+${issues.map(i => `- ${i}`).join("\n")}
+
+Return ONLY a fully corrected, self-contained HTML document. Keep styles minimal and dark-friendly. No external assets.
+Here is your previous attempt (for reference):
+---
+${html}
+---
+`;
+
+// ---------- Existing builder prompts ----------
+const buildPlanPrompt = (count: number, preferredTitle?: string, userPrompt?: string) => `
 You will propose a small website plan as compact JSON only.
 
 Rules:
@@ -102,21 +148,73 @@ Rules:
 - The JSON must be: { "site_title": string, "pages": [{ "id": string, "title": string, "purpose": string }] }
 - "id" must be kebab-case, unique.
 - Suggest exactly ${count} pages that make sense for the user's request.
+${preferredTitle ? `- Use "${preferredTitle}" as the site title unless there is a compelling reason to improve it.\n` : ""}
 
 User goal/context:
-${userPrompt}
+${userPrompt || DEFAULT_USER_PROMPT}
 `;
 
-    const buildPagePrompt = (siteTitle: string, page: { id: string; title: string; purpose?: string }) => `
+const buildSharedLayoutPrompt = (pageEstimate: number, userPrompt?: string) => `
+Design a shared header and footer for the upcoming site. Return ONLY JSON shaped exactly as { "site_title": string, "header": string, "footer": string }.
+
+Expectations:
+- header/footer are HTML snippets (no <!doctype>, <html>, or <body>).
+- Keep styles minimal and scoped.
+- Header must have site title + <nav data-shared-nav> with ${pageEstimate} <a data-nav-slot="n" href="#page-n">Label n</a>.
+- Footer includes concise contact/CTA.
+
+User goal/context:
+${userPrompt || DEFAULT_USER_PROMPT}
+`;
+
+const buildPagePrompt = (
+    siteTitle: string,
+    page: { id: string; title: string; purpose?: string },
+    pagePlan: PagePlan | null,
+    layout: SharedLayout | null,
+    allPages: { id: string; title: string }[],
+) => {
+    const layoutGuidance = layout
+        ? `- Reuse the shared header/footer provided below without changing their structure.
+- Replace every <a data-nav-slot> so it links to the exact page list (href="<id>.html"); visually indicate "${page.id}" as active.
+`
+        : `- Include a simple <header> with "${siteTitle}" and a nav placeholder.
+`;
+
+    const sharedChromeSnippet = layout
+        ? `Shared header snippet:
+${layout.header}
+
+Shared footer snippet:
+${layout.footer}
+`
+        : "";
+
+    const navList = allPages.map((p) => `- ${p.title} (${p.id}.html)`).join("\n");
+
+    const planning = pagePlan ? `
+Per-page plan to implement:
+- Outline: ${pagePlan.outline.join(" · ")}
+- Components: ${(pagePlan.components || []).join(", ")}
+- Copy: ${(pagePlan.copy_points || []).join(" | ")}
+- Interactions: ${(pagePlan.interactions || []).join(", ")}
+- SEO: ${pagePlan.seo?.title || ""} — ${pagePlan.seo?.description || ""}
+` : "";
+
+    return `
 Generate a single, self-contained HTML5 document for the page below.
 
 Constraints:
-- Include <!doctype html>, <html lang="en">, <head> with <meta charset="utf-8"> and a <title>.
+- <!doctype html>, <html lang="en">, <head> with <meta charset="utf-8"> and a <title>.
 - Inline <style> with a minimal, modern, dark-friendly palette.
 - Optional <script> allowed for small interactions only (no external imports).
 - The page must be fully functional if saved as a standalone .html file.
-- Include a simple <header> featuring "${siteTitle}" and a nav placeholder (no broken links).
-- Use the page "purpose" to drive content. Avoid lorem ipsum.
+${layoutGuidance}- Use the page "purpose" to drive content. Avoid lorem ipsum.
+${planning}
+Site navigation targets:
+${navList}
+
+${sharedChromeSnippet}
 
 Return ONLY the final HTML document. Do not wrap in Markdown.
 
@@ -127,263 +225,568 @@ Page:
   "purpose": ${JSON.stringify(page.purpose || "")}
 }
 `;
+};
 
+export default function AutoBuilder() {
+    const [models, setModels] = useState<string[]>([]);
+    const [model, setModel] = useState<string>("");
+
+    const [prePrompt, setPrePrompt] = useState(DEFAULT_PREPROMPT);
+    const [userPrompt, setUserPrompt] = useState(DEFAULT_USER_PROMPT);
+    const [pageCount, setPageCount] = useState<number>(3);
+
+    // NEW: settings
+    const [maxFixes, setMaxFixes] = useState<number>(2);
+    const [useCustomCtx, setUseCustomCtx] = useState<boolean>(false);
+    const [ctxLen, setCtxLen] = useState<number>(8192);
+
+    const [ruleFlags, setRuleFlags] = useState<RuleFlags>({
+        html: true,
+        head: true,
+        body: true,
+        title: true,
+        noExternalScript: true,
+    });
+
+    // Workflow log
+    const [status, setStatus] = useState<string>("");
+    const [statusLines, setStatusLines] = useState<string[]>([]);
+
+    const [plan, setPlan] = useState<Plan | null>(null);
+    const [sharedLayout, setSharedLayout] = useState<SharedLayout | null>(null);
+    const [pages, setPages] = useState<BuiltPage[]>([]);
+    const [pagePlans, setPagePlans] = useState<Record<string, PagePlan>>({});
+
+    const [stepIndex, setStepIndex] = useState<number>(-1);
+
+    // Live stream inside hero
+    const [liveStream, setLiveStream] = useState<LiveStreamState | null>(null);
+    const [isThinking, setIsThinking] = useState(false);
+    const liveContainerRef = useRef<HTMLDivElement | null>(null);
+
+    const heroDetails = useMemo(() => {
+        if (stepIndex >= STEPS.length && pages.length > 0) return { ...COMPLETE_CARD, index: STEPS.length };
+        if (stepIndex >= 0) { const idx = Math.min(stepIndex, STEPS.length - 1); return { ...STEPS[idx], index: idx }; }
+        return { title: "Ready for your brief", subtitle: "Set requirements and start the automated build", accent: "from-slate-500 via-slate-400 to-slate-300", index: -1 };
+    }, [stepIndex, pages.length]);
+
+    const heroProgress = useMemo(() => {
+        if (stepIndex < 0) return 0;
+        if (stepIndex >= STEPS.length) return 1;
+        return Math.min((stepIndex + 1) / STEPS.length, 1);
+    }, [stepIndex]);
+
+    const showPreviewCTA = useMemo(() => pages.length > 0 && stepIndex >= STEPS.length, [pages.length, stepIndex]);
+
+    useEffect(() => {
+        const el = liveContainerRef.current;
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+    }, [liveStream?.cleaned]);
+
+    useEffect(() => {
+        (async () => {
+            try {
+                const r = await fetch("/api/ollama/tags");
+                const names: string[] = await r.json();
+                setModels(names);
+                setModel((prev) => prev || names[0] || "qwen3:8b");
+            } catch {
+                setModels(["error"]);
+                setModel((prev) => prev || "qwen3:8b");
+            }
+        })();
+    }, []);
+
+    const log = (line: string) => {
+        setStatus((s) => s + (s ? "\n" : "") + line);
+        const lines = line.split("\n").map((l) => l.trim()).filter(Boolean);
+        setStatusLines((prev) => [...prev, ...lines]);
+    };
+
+    const resetAll = () => {
+        setPlan(null);
+        setSharedLayout(null);
+        setPages([]);
+        setPagePlans({});
+        setStatus("");
+        setStatusLines([]);
+        setStepIndex(-1);
+        setLiveStream(null);
+        setIsThinking(false);
+    };
+
+    // Live stream helpers
+    const beginLiveStream = useCallback((phase: LiveStreamPhase, label: string) => {
+        setLiveStream({ phase, label, raw: "", cleaned: "", thoughts: [], history: [] });
+        setIsThinking(false);
+    }, []);
+
+    const appendLiveStream = useCallback((phase: LiveStreamPhase, label: string, chunk: string) => {
+        if (chunk.includes("<think>")) setIsThinking(true);
+        if (chunk.includes("</think>")) setIsThinking(false);
+
+        setLiveStream((prev) => {
+            const raw = (prev && prev.phase === phase ? prev.raw : "") + chunk;
+            const { cleaned, thoughts } = stripThinkingArtifacts(raw);
+            const existingHistory = prev && prev.phase === phase ? prev.history : [];
+            const known = new Set(existingHistory.map((h) => h.text));
+            const newEntries = thoughts
+                .filter((t) => !known.has(t))
+                .map((text) => ({ id: `${phase}-${Date.now()}-${Math.random().toString(16).slice(2)}`, text, timestamp: Date.now() }));
+            return { phase, label, raw, cleaned, thoughts, history: [...existingHistory, ...newEntries] };
+        });
+    }, []);
+
+    // Validation based on toggles
     const validateHtml = (html: string) => {
         const issues: string[] = [];
-        for (const r of VALIDATION_RULES) {
-            if (!r.check(html)) issues.push(r.issue);
-        }
-        // quick sanity: forbid <script src="http to avoid remote pulls
-        if (/<script[^>]+src=("|')https?:\/\//i.test(html)) {
+        if (ruleFlags.html && !/<html[\s>]/i.test(html)) issues.push("Missing <html> tag.");
+        if (ruleFlags.head && !/<head[\s>]/i.test(html)) issues.push("Missing <head> tag.");
+        if (ruleFlags.body && !/<body[\s>]/i.test(html)) issues.push("Missing <body> tag.");
+        if (ruleFlags.title && !/<title>[^<]{1,100}<\/title>/i.test(html)) issues.push("Missing <title> tag.");
+        if (ruleFlags.noExternalScript && /<script[^>]+src=("|')https?:\/\//i.test(html))
             issues.push("External script src detected — must be self-contained.");
-        }
         return { valid: issues.length === 0, issues };
     };
 
+    // Compose optional Ollama options
+    const aiOptions = useMemo(() => {
+        return useCustomCtx ? { options: { num_ctx: Math.max(1024, Math.floor(ctxLen)) } } : {};
+    }, [useCustomCtx, ctxLen]);
+
+    // ---------- Main workflow: per-page plan → code → validate/fix ----------
     const runWorkflow = async () => {
         if (!model) return;
-        setBusy(true);
-        setStatus("");
-        setPages([]);
-        setPlan(null);
-        setActiveId("");
+
+        // Reset
+        setStatus(""); setStatusLines([]);
+        setPages([]); setPagePlans({});
+        setPlan(null); setSharedLayout(null);
+        setStepIndex(0); setLiveStream(null); setIsThinking(false);
 
         try {
-            // 1) Idealizing (site plan)
-            log("1) Idealizing: drafting pages JSON…");
-            const planRaw = await callAi(model, buildPlanPrompt(pageCount), {
-                prePrompt,
-                json: true,
+            // 1) Shared layout
+            log("1) Layout: crafting shared header and footer…");
+            beginLiveStream("layout", "Designing shared chrome");
+            const layoutRaw = await callAi(model, buildSharedLayoutPrompt(pageCount, userPrompt), {
+                prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("layout", "Designing shared chrome", c),
+                ...aiOptions,
             });
+
+            const layoutJsonText = extractJsonObject(layoutRaw);
+            let layoutParsed: { site_title?: string; header?: string; footer?: string } | null = null;
+            try { layoutParsed = JSON.parse(layoutJsonText); } catch { throw new Error("Could not parse shared header/footer JSON"); }
+            if (!layoutParsed?.header || !layoutParsed?.footer) throw new Error("Shared header/footer response missing required fields");
+
+            const sharedChrome: SharedLayout = {
+                header: layoutParsed.header.trim(),
+                footer: layoutParsed.footer.trim(),
+                siteTitle: layoutParsed.site_title?.trim(),
+                thinking: stripThinkingArtifacts(layoutRaw).thoughts,
+            };
+            setSharedLayout(sharedChrome);
+            log("→ Generated unified header & footer.");
+            setStepIndex(1);
+
+            // 2) Site map
+            log("2) Site map: drafting pages JSON…");
+            beginLiveStream("plan", "Planning site map");
+            const planRaw = await callAi(model, buildPlanPrompt(pageCount, sharedChrome.siteTitle, userPrompt), {
+                prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("plan", "Planning site map", c),
+                ...aiOptions,
+            });
+
             let parsed: Plan | null = null;
             try {
-                parsed = JSON.parse(planRaw);
+                parsed = JSON.parse(extractJsonObject(planRaw));
                 if (!parsed?.pages?.length) throw new Error("Missing pages");
             } catch {
-                // If model added text around JSON, try extracting the JSON block:
-                const match = planRaw.match(/\{[\s\S]*\}$/);
-                if (match) {
-                    parsed = JSON.parse(match[0]);
-                } else {
-                    throw new Error("Could not parse plan JSON");
+                throw new Error("Could not parse plan JSON");
+            }
+            const normalisedPlan: Plan = { site_title: parsed!.site_title || sharedChrome.siteTitle, pages: parsed!.pages };
+            setPlan(normalisedPlan);
+            log(`→ Planned ${normalisedPlan.pages.length} page(s).`);
+            setStepIndex(2);
+
+            // 3) Per page — PLAN → BUILD → VALIDATE/FIX
+            const builtPages: BuiltPage[] = [];
+            const allNav = normalisedPlan.pages.map(({ id, title }) => ({ id, title }));
+            const brandContext = userPrompt;
+
+            for (const p of normalisedPlan.pages) {
+                // 3a) Page plan
+                const planLabel = `Planning page "${p.title}"`;
+                log(`3) ${planLabel}…`);
+                beginLiveStream("page", planLabel);
+                const pagePlanRaw = await callAi(
+                    model,
+                    buildPagePlanPrompt(normalisedPlan.site_title || sharedChrome.siteTitle || "My Site", p, allNav, brandContext),
+                    { prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("page", planLabel, c), ...aiOptions },
+                );
+
+                let pagePlan: PagePlan;
+                try { pagePlan = JSON.parse(extractJsonObject(pagePlanRaw)) as PagePlan; }
+                catch { throw new Error(`Could not parse page plan for ${p.title}`); }
+                setPagePlans((prev) => ({ ...prev, [p.id]: pagePlan }));
+                log(`→ Page plan ready for "${p.title}".`);
+
+                // 3b) Build code
+                const buildLabel = `Generating code for "${p.title}"`;
+                log(`   • ${buildLabel}…`);
+                beginLiveStream("page", buildLabel);
+                const htmlRaw = await callAi(
+                    model,
+                    buildPagePrompt(normalisedPlan.site_title || sharedChrome.siteTitle || "My Site", p, pagePlan, sharedChrome, allNav),
+                    { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", buildLabel, c), ...aiOptions },
+                );
+                let { cleaned: html, thoughts } = stripThinkingArtifacts(htmlRaw);
+                let { valid, issues } = validateHtml(html);
+
+                // 3c) Validate & auto-fix loop (configurable)
+                let attempts = 0;
+                while (!valid && attempts < maxFixes) {
+                    attempts++;
+                    const fixLabel = `Fixing "${p.title}" (pass ${attempts}/${maxFixes})`;
+                    log(`   • ${fixLabel}…`);
+                    beginLiveStream("page", fixLabel);
+                    const fixedRaw = await callAi(
+                        model,
+                        buildFixPrompt(normalisedPlan.site_title || sharedChrome.siteTitle || "My Site", p.title, issues, html),
+                        { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", fixLabel, c), ...aiOptions },
+                    );
+                    const processed = stripThinkingArtifacts(fixedRaw);
+                    html = processed.cleaned;
+                    thoughts = [...thoughts, ...processed.thoughts];
+                    const check = validateHtml(html);
+                    valid = check.valid;
+                    issues = check.issues;
                 }
-            }
-            setPlan(parsed!);
-            log(`→ Planned ${parsed!.pages.length} page(s).`);
 
-            // 2) Code Generation (one prompt per page)
-            log("2) Code Generation: generating each page…");
-            const built: BuiltPage[] = [];
-            for (const p of parsed!.pages) {
-                log(`   • Generating "${p.title}"…`);
-                const html = await callAi(model, buildPagePrompt(parsed!.site_title || "My Site", p), {
-                    prePrompt,
-                    json: false,
-                });
+                if (valid) {
+                    log(`   • "${p.title}" ✅ Passed validation.`);
+                } else {
+                    log(`   • "${p.title}" ⚠️ Still has issues: ${issues.join("; ")}`);
+                }
 
-                // 3) Organization: push into our pages map
-                const { valid, issues } = validateHtml(html);
-                built.push({ id: p.id, title: p.title, html, valid, issues });
+                const built = { id: p.id, title: p.title, html, valid, issues, thinking: thoughts };
+                builtPages.push(built);
+                setPages((prev) => [...prev, built]);
             }
-            setPages(built);
-            setActiveId(built[0]?.id || "");
 
-            // 4) Validation summary
-            const bad = built.filter((b) => !b.valid);
-            if (bad.length === 0) {
-                log("4) Validation: all pages look OK ✅");
-            } else {
-                log(`4) Validation: ${bad.length} page(s) have issues. Review below ⚠️`);
-            }
-        } catch (e: any) {
-            log(`Error: ${e?.message || "unknown"}`);
-        } finally {
-            setBusy(false);
+            // 4) Wrap-up
+            const bad = builtPages.filter((b) => !b.valid);
+            log(bad.length === 0 ? "4) Validation: all pages look OK ✅" : `4) Validation: ${bad.length} page(s) still have issues ⚠️`);
+            setStepIndex(4);
+            setTimeout(() => setStepIndex(STEPS.length), 120);
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error ?? "unknown");
+            log(`Error: ${message}`);
         }
     };
 
-    // Render active page into sandboxed iframe
-    const activePage = useMemo(() => pages.find((p) => p.id === activeId) || null, [pages, activeId]);
-    useEffect(() => {
-        if (!iframeRef.current || !activePage) return;
-        const doc = iframeRef.current.contentDocument;
-        if (!doc) return;
-        doc.open();
-        doc.write(activePage.html);
-        doc.close();
-    }, [activePage]);
+    // Preview dialog/tab (unchanged)
+    const handlePreviewClick = useCallback(() => {
+        if (pages.length === 0) return;
+
+        const escapeHtml = (v: string) =>
+            v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+        const sanitizedPages = pages.map((p) => ({ id: p.id, title: p.title, html: p.html.replace(/<\/script/gi, "<\\/script") }));
+        const safeJson = JSON.stringify(sanitizedPages).replace(/<\//g, "<\\/");
+        const siteTitle = escapeHtml(plan?.site_title || sharedLayout?.siteTitle || "Generated Site Preview");
+
+        const previewDocument = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><title>${siteTitle} — Preview</title><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+:root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#020617;color:#e2e8f0}
+body{margin:0;min-height:100vh;display:flex;flex-direction:column}
+.app{display:flex;flex:1;min-height:0}
+aside{width:280px;padding:24px;border-right:1px solid rgba(148,163,184,.25);background:rgba(15,23,42,.82);backdrop-filter:blur(18px);display:flex;flex-direction:column;gap:16px}
+h1{font-size:1.1rem;margin:0;letter-spacing:.08em;text-transform:uppercase;color:#38bdf8}
+#nav{display:flex;flex-direction:column;gap:10px}
+button.page-btn{appearance:none;border:1px solid rgba(148,163,184,.35);background:rgba(30,64,175,.18);color:inherit;border-radius:999px;padding:10px 16px;font:inherit;text-align:left;cursor:pointer;transition:border-color .2s,background .2s,transform .2s}
+button.page-btn.active{border-color:rgba(56,189,248,.9);background:rgba(56,189,248,.25);transform:translateX(4px)}
+button.page-btn:hover{border-color:rgba(56,189,248,.6)}
+main{flex:1;display:flex;flex-direction:column;min-width:0;background:radial-gradient(circle at top right, rgba(56,189,248,.15), transparent 45%),radial-gradient(circle at bottom left, rgba(236,72,153,.12), transparent 55%),#020617}
+.preview-header{padding:20px 28px;display:flex;justify-content:space-between;align-items:center;gap:16px;border-bottom:1px solid rgba(148,163,184,.2);background:rgba(15,23,42,.9);backdrop-filter:blur(16px)}
+.preview-header h2{margin:0;font-size:1.05rem;font-weight:600}
+.preview-header span{opacity:.7;font-size:.8rem;letter-spacing:.1em;text-transform:uppercase}
+#open-tab{appearance:none;border-radius:999px;border:1px solid rgba(34,197,94,.45);background:rgba(22,163,74,.2);color:#bbf7d0;padding:8px 14px;font:inherit;cursor:pointer;transition:border .2s,background .2s}
+#open-tab:hover{border-color:rgba(34,197,94,.8);background:rgba(22,163,74,.28)}
+iframe{flex:1;border:none;width:100%;min-height:0;background:white}
+@media (max-width:900px){.app{flex-direction:column}aside{flex-direction:row;overflow-x:auto;width:100%}button.page-btn{min-width:160px}}
+</style></head>
+<body>
+<div class="app">
+  <aside>
+    <div><h1>${siteTitle}</h1><p style="font-size:.8rem;opacity:.65;margin-top:8px;">Select a page to preview.</p></div>
+    <div id="nav"></div>
+  </aside>
+  <main>
+    <div class="preview-header"><div><span>Currently viewing</span><h2 id="current-title">&nbsp;</h2></div><button id="open-tab" type="button">Open standalone tab</button></div>
+    <iframe id="preview-frame" sandbox="allow-scripts allow-same-origin"></iframe>
+  </main>
+</div>
+<script id="page-data" type="application/json">${safeJson}</script>
+<script>
+const pages=JSON.parse(document.getElementById('page-data').textContent);
+const nav=document.getElementById('nav');const frame=document.getElementById('preview-frame');const titleEl=document.getElementById('current-title');const openBtn=document.getElementById('open-tab');let current=null;
+function clean(html){return html.replace(/<\\/script/gi,'</'+'script>');}
+function render(page){if(!page)return;current=page;frame.srcdoc=clean(page.html);titleEl.textContent=page.title;for(const btn of nav.querySelectorAll('button.page-btn')){btn.classList.toggle('active',btn.dataset.id===page.id);}}
+openBtn.addEventListener('click',()=>{if(!current)return;const blob=new Blob([clean(current.html)],{type:'text/html'});const url=URL.createObjectURL(blob);window.open(url,'_blank','noopener,noreferrer');setTimeout(()=>URL.revokeObjectURL(url),120000);});
+pages.forEach((page,i)=>{const btn=document.createElement('button');btn.type='button';btn.className='page-btn';btn.textContent=page.title;btn.dataset.id=page.id;btn.addEventListener('click',()=>render(page));nav.appendChild(btn);if(i===0)render(page);});
+</script>
+</body></html>`;
+
+        const blob = new Blob([previewDocument], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        window.open(url, "_blank", "noopener,noreferrer");
+        setTimeout(() => URL.revokeObjectURL(url), 120_000);
+    }, [pages, plan, sharedLayout]);
 
     return (
-        <div className="min-h-screen bg-neutral-950 text-neutral-100">
-            <header className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
-                <h1 className="text-xl font-semibold tracking-tight">
-                    AI Auto Website Builder
-                </h1>
-                <a
-                    href="https://ollama.com"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="rounded-lg border border-neutral-800 px-3 py-1 text-sm opacity-70 hover:opacity-100"
-                >
-                    Ollama
-                </a>
+        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-neutral-100">
+            {/* SINGLE STYLISH TOP BAR */}
+            <header className="sticky top-0 z-40 border-b border-slate-800/70 bg-slate-900/80 backdrop-blur">
+                <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+                    <h1 className="text-sm font-semibold tracking-wider">
+                        <span className="mr-2 rounded-md bg-sky-500/15 px-2 py-1 text-sky-200">AI</span> Auto Website Builder
+                    </h1>
+                    <a
+                        href="https://ollama.com"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-lg border border-slate-700/70 bg-slate-900/60 px-3 py-1 text-xs text-slate-200 transition hover:border-slate-500 hover:text-white"
+                    >
+                        Powered by Ollama
+                    </a>
+                </div>
             </header>
 
-            <main className="mx-auto grid max-w-5xl gap-6 px-6 pb-24">
-                {/* Controls */}
-                <section className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-4 md:p-6">
-                    <div className="grid gap-4 md:grid-cols-2">
-                        <div className="space-y-3">
-                            <label className="text-sm opacity-80">Model</label>
-                            <div className="flex gap-3">
-                                <select
-                                    value={model}
-                                    onChange={(e) => setModel(e.target.value)}
-                                    className="w-full rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none ring-0 focus:border-neutral-700"
-                                >
-                                    {models.map((m) => (
-                                        <option key={m} value={m}>{m}</option>
-                                    ))}
-                                </select>
+            {/* STATUS HERO (with Steps + Page Build live stream) */}
+            <section className="mx-auto w-full max-w-5xl px-6 py-6">
+                <div className="relative overflow-hidden rounded-3xl border border-slate-800/60 bg-slate-900/60 px-6 py-8 shadow-lg shadow-sky-950/30 backdrop-blur">
+                    <div className={`absolute inset-0 bg-gradient-to-r ${heroDetails.accent} opacity-30 blur-3xl`} />
+                    <div className="relative z-10">
+                        <div className="flex flex-col items-start md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <p className="text-xs uppercase tracking-[0.35em] text-neutral-400">
+                                    {heroDetails.index >= 0 && heroDetails.index < STEPS.length ? `Step ${heroDetails.index + 1} of ${STEPS.length}` : heroDetails.index >= STEPS.length ? "Complete" : "Idle"}
+                                </p>
+                                <h2 className="mt-3 text-2xl font-semibold text-white md:text-3xl">{heroDetails.title}</h2>
+                                <p className="mt-2 max-w-xl text-sm text-neutral-300 md:text-base">{heroDetails.subtitle}</p>
+                            </div>
+                            <div className="mt-4 flex gap-2 md:mt-0">
                                 <button
                                     type="button"
-                                    onClick={async () => {
-                                        const r = await fetch("/api/ollama/tags");
-                                        const names: string[] = await r.json();
-                                        setModels(names);
-                                        if (!names.includes(model) && names[0]) setModel(names[0]);
-                                    }}
-                                    className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm hover:border-neutral-700"
+                                    onClick={runWorkflow}
+                                    className="rounded-xl bg-gradient-to-r from-sky-600 to-indigo-500 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-sky-900/40 hover:from-sky-500 hover:to-indigo-400"
                                 >
-                                    Refresh
+                                    Generate
                                 </button>
-                            </div>
-
-                            <label className="text-sm opacity-80"># Pages</label>
-                            <input
-                                type="number"
-                                min={1}
-                                max={8}
-                                value={pageCount}
-                                onChange={(e) => setPageCount(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
-                                className="w-28 rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-neutral-700"
-                            />
-                        </div>
-
-                        <div className="space-y-3">
-                            <label className="text-sm opacity-80">Pre-prompt (system)</label>
-                            <textarea
-                                rows={6}
-                                value={prePrompt}
-                                onChange={(e) => setPrePrompt(e.target.value)}
-                                className="w-full resize-y rounded-2xl border border-neutral-800 bg-neutral-900 px-4 py-3 text-sm leading-relaxed outline-none placeholder:opacity-40 focus:border-neutral-700"
-                            />
-                        </div>
-                    </div>
-
-                    <div className="mt-4">
-                        <label className="mb-2 block text-sm opacity-80">User Prompt</label>
-                        <textarea
-                            rows={4}
-                            value={userPrompt}
-                            onChange={(e) => setUserPrompt(e.target.value)}
-                            placeholder="Describe the site you want…"
-                            className="w-full resize-y rounded-2xl border border-neutral-800 bg-neutral-900 px-4 py-3 text-sm leading-relaxed outline-none placeholder:opacity-40 focus:border-neutral-700"
-                        />
-                    </div>
-
-                    <div className="mt-4 flex gap-2">
-                        <button
-                            type="button"
-                            onClick={runWorkflow}
-                            disabled={busy}
-                            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${busy ? "bg-neutral-800 text-neutral-400" : "bg-blue-600 hover:bg-blue-500"}`}
-                        >
-                            {busy ? "Working…" : "Generate"}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={resetAll}
-                            disabled={busy}
-                            className="rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:border-neutral-700"
-                        >
-                            Reset
-                        </button>
-                    </div>
-                </section>
-
-                {/* Status */}
-                <section className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-4 md:p-6">
-                    <h2 className="mb-2 text-sm font-semibold opacity-80">Workflow Log</h2>
-                    <pre className="min-h-24 whitespace-pre-wrap rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-xs leading-relaxed">
-                        {status || "Idle"}
-                    </pre>
-                </section>
-
-                {/* Plan */}
-                {plan && (
-                    <section className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-4 md:p-6">
-                        <h2 className="mb-3 text-sm font-semibold opacity-80">Plan</h2>
-                        <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-sm">
-                            <div className="mb-2 opacity-80">Site: {plan.site_title || "Untitled"}</div>
-                            <ul className="space-y-1">
-                                {plan.pages.map((p) => (
-                                    <li key={p.id} className="opacity-80">• {p.title} <span className="opacity-50">({p.id})</span></li>
-                                ))}
-                            </ul>
-                        </div>
-                    </section>
-                )}
-
-                {/* Generated Pages */}
-                {pages.length > 0 && (
-                    <section className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-4 md:p-6">
-                        <div className="mb-3 flex flex-wrap items-center gap-2">
-                            <h2 className="text-sm font-semibold opacity-80">Generated Pages</h2>
-                            <div className="flex flex-wrap gap-2">
-                                {pages.map((p) => (
+                                <button
+                                    type="button"
+                                    onClick={resetAll}
+                                    className="rounded-xl border border-slate-800/70 bg-slate-950/60 px-4 py-2 text-sm transition hover:border-slate-500"
+                                >
+                                    Reset
+                                </button>
+                                {showPreviewCTA && (
                                     <button
-                                        key={p.id}
-                                        onClick={() => setActiveId(p.id)}
-                                        className={`rounded-lg border px-3 py-1.5 text-xs ${activeId === p.id ? "border-blue-500 bg-blue-600/20" : "border-neutral-800 hover:border-neutral-700"}`}
+                                        type="button"
+                                        onClick={handlePreviewClick}
+                                        className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:border-emerald-400 hover:bg-emerald-500/30"
                                     >
-                                        {p.title} {p.valid ? "✅" : "⚠️"}
+                                        Preview generated site
                                     </button>
-                                ))}
+                                )}
                             </div>
                         </div>
 
-                        <div className="grid gap-4 md:grid-cols-2">
-                            {/* Code */}
-                            <div className="space-y-2">
-                                <div className="text-xs opacity-70">Code</div>
-                                <pre className="max-h-[480px] overflow-auto rounded-xl border border-neutral-800 bg-neutral-950/60 p-4 text-xs leading-relaxed">
-                                    {activePage?.html || "Select a page"}
-                                </pre>
-                                {activePage && activePage.issues.length > 0 && (
-                                    <div className="rounded-xl border border-amber-900/40 bg-amber-950/40 p-3 text-xs">
-                                        <div className="mb-1 font-medium">Validation issues:</div>
-                                        <ul className="list-disc pl-4">
-                                            {activePage.issues.map((i, idx) => <li key={idx}>{i}</li>)}
-                                        </ul>
-                                    </div>
+                        <div className="mt-6 h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                            <div
+                                className="h-full rounded-full bg-gradient-to-r from-sky-500 via-blue-500 to-purple-500 transition-all duration-500"
+                                style={{ width: `${Math.max(heroProgress, showPreviewCTA ? 1 : 0) * 100}%` }}
+                            />
+                        </div>
+
+                        <div className="mt-6 grid gap-4 md:grid-cols-2">
+                            {/* Steps mirror */}
+                            <div className="rounded-2xl border border-slate-800/70 bg-slate-950/60 p-4">
+                                <div className="mb-2 text-[0.7rem] uppercase tracking-[0.3em] text-slate-400">Steps</div>
+                                {statusLines.length === 0 ? (
+                                    <p className="text-sm text-slate-300/80">No steps yet — click Generate to start.</p>
+                                ) : (
+                                    <ul className="space-y-2 text-sm text-slate-200">
+                                        {statusLines.map((line, i) => (
+                                            <li key={`${i}-${line}`} className="flex items-start gap-2">
+                                                <span className="mt-1 inline-block h-1.5 w-1.5 rounded-full bg-sky-400" />
+                                                <span className="whitespace-pre-wrap">{line}</span>
+                                            </li>
+                                        ))}
+                                    </ul>
                                 )}
                             </div>
 
-
+                            {/* Page build stream (live) */}
+                            {liveStream && (
+                                <div className="rounded-2xl border border-slate-800/70 bg-slate-950/60 p-4">
+                                    <div className="mb-2 flex items-center justify-between">
+                                        <div className="text-[0.7rem] uppercase tracking-[0.3em] text-slate-400">
+                                            Page build — {liveStream.phase === "plan" ? "Planning" : liveStream.phase === "layout" ? "Shared layout" : "Page build"}
+                                        </div>
+                                        <span
+                                            className={`inline-flex items-center gap-2 rounded-full px-2.5 py-0.5 text-[0.7rem] ${isThinking ? "border border-purple-400/50 bg-purple-500/15 text-purple-100" : "border border-slate-700/60 bg-slate-800/60 text-slate-300"
+                                                }`}
+                                        >
+                                            <span className={`h-1.5 w-1.5 rounded-full ${isThinking ? "animate-pulse bg-purple-400" : "bg-slate-400"}`} />
+                                            {isThinking ? "Thinking…" : "Responding…"}
+                                        </span>
+                                    </div>
+                                    <div ref={liveContainerRef} className="max-h-[260px] overflow-auto rounded-xl border border-slate-800/60 bg-slate-950/70 p-3">
+                                        <div className="prose-invert text-sm leading-relaxed whitespace-pre-wrap break-words">
+                                            <p className="m-0">{liveStream.cleaned || "Waiting for model output…"}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                         </div>
-                        {/* Preview */}
-                        <div className="space-y-2">
-                            <div className="text-xs opacity-70">Preview (sandboxed)</div>
-                            <iframe
-                                ref={iframeRef}
-                                sandbox="allow-scripts allow-same-origin"
-                                className="h-[520px] w-full rounded-xl border border-neutral-800 bg-white"
+                    </div>
+                </div>
+            </section>
+
+            {/* CONTROLS */}
+            <section className={`mx-auto w-full max-w-5xl px-6 pb-6 ${PANEL_CLASS} p-4 md:p-6`}>
+                <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-3">
+                        <label className="text-sm opacity-80">Model</label>
+                        <div className="flex gap-3">
+                            <select
+                                value={model}
+                                onChange={(e) => setModel(e.target.value)}
+                                className="w-full rounded-xl border border-slate-800/70 bg-slate-950/60 px-3 py-2 text-sm outline-none ring-0 focus:border-slate-500"
+                            >
+                                {models.map((m) => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    const r = await fetch("/api/ollama/tags");
+                                    const names: string[] = await r.json();
+                                    setModels(names);
+                                    if (!names.includes(model) && names[0]) setModel(names[0]);
+                                }}
+                                className="rounded-xl border border-slate-800/70 bg-slate-950/60 px-3 py-2 text-sm transition hover:border-slate-500"
+                            >
+                                Refresh
+                            </button>
+                        </div>
+
+                        <label className="text-sm opacity-80"># Pages</label>
+                        <input
+                            type="number" min={1} max={8} value={pageCount}
+                            onChange={(e) => setPageCount(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
+                            className="w-28 rounded-xl border border-slate-800/70 bg-slate-950/60 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                        />
+                    </div>
+
+                    <div className="space-y-3">
+                        <label className="text-sm opacity-80">Pre-prompt (system)</label>
+                        <textarea
+                            rows={6} value={prePrompt} onChange={(e) => setPrePrompt(e.target.value)}
+                            className="w-full resize-y rounded-2xl border border-slate-800/70 bg-slate-950/60 px-4 py-3 text-sm leading-relaxed outline-none placeholder:opacity-40 focus:border-slate-500"
+                        />
+                    </div>
+                </div>
+
+                {/* NEW: Settings row */}
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <div className="space-y-3 rounded-xl border border-slate-800/70 bg-slate-950/60 p-4">
+                        <div className="flex items-center justify-between">
+                            <label className="text-sm font-medium">Max fix attempts</label>
+                            <input
+                                type="number"
+                                min={0}
+                                max={6}
+                                value={maxFixes}
+                                onChange={(e) => setMaxFixes(Math.max(0, Math.min(6, Number(e.target.value) || 0)))}
+                                className="w-24 rounded-lg border border-slate-800/70 bg-slate-950/60 px-2 py-1 text-sm outline-none focus:border-slate-500"
                             />
                         </div>
-                    </section>
-                )}
-            </main>
+
+                        <div className="flex items-center justify-between">
+                            <label className="text-sm font-medium">Use custom context</label>
+                            <input
+                                type="checkbox"
+                                checked={useCustomCtx}
+                                onChange={(e) => setUseCustomCtx(e.target.checked)}
+                                className="h-4 w-4 accent-sky-500"
+                            />
+                        </div>
+                        <div className="flex items-center justify-between opacity-90">
+                            <label className="text-sm">Context length (num_ctx)</label>
+                            <input
+                                type="number"
+                                min={1024}
+                                step={512}
+                                disabled={!useCustomCtx}
+                                value={ctxLen}
+                                onChange={(e) => setCtxLen(Math.max(1024, Number(e.target.value) || 1024))}
+                                className={`w-28 rounded-lg border px-2 py-1 text-sm outline-none ${useCustomCtx ? "border-slate-800/70 bg-slate-950/60 focus:border-slate-500" : "border-slate-900/60 bg-slate-900/60 text-slate-500"}`}
+                            />
+                        </div>
+                        {!useCustomCtx ? (
+                            <p className="text-xs text-slate-400">Using model default context window.</p>
+                        ) : (
+                            <p className="text-xs text-slate-400">Make sure the selected model actually supports this window.</p>
+                        )}
+                    </div>
+
+                    <div className="space-y-2 rounded-xl border border-slate-800/70 bg-slate-950/60 p-4">
+                        <div className="text-sm font-medium">Validation rules</div>
+                        <div className="mt-1 grid grid-cols-2 gap-2 text-sm">
+                            <label className="inline-flex items-center gap-2">
+                                <input type="checkbox" checked={ruleFlags.html} onChange={e => setRuleFlags(f => ({ ...f, html: e.target.checked }))} className="h-4 w-4 accent-sky-500" />
+                                <span>&lt;html&gt; present</span>
+                            </label>
+                            <label className="inline-flex items-center gap-2">
+                                <input type="checkbox" checked={ruleFlags.head} onChange={e => setRuleFlags(f => ({ ...f, head: e.target.checked }))} className="h-4 w-4 accent-sky-500" />
+                                <span>&lt;head&gt; present</span>
+                            </label>
+                            <label className="inline-flex items-center gap-2">
+                                <input type="checkbox" checked={ruleFlags.body} onChange={e => setRuleFlags(f => ({ ...f, body: e.target.checked }))} className="h-4 w-4 accent-sky-500" />
+                                <span>&lt;body&gt; present</span>
+                            </label>
+                            <label className="inline-flex items-center gap-2">
+                                <input type="checkbox" checked={ruleFlags.title} onChange={e => setRuleFlags(f => ({ ...f, title: e.target.checked }))} className="h-4 w-4 accent-sky-500" />
+                                <span>&lt;title&gt; present</span>
+                            </label>
+                            <label className="inline-flex items-center gap-2 col-span-2">
+                                <input type="checkbox" checked={ruleFlags.noExternalScript} onChange={e => setRuleFlags(f => ({ ...f, noExternalScript: e.target.checked }))} className="h-4 w-4 accent-sky-500" />
+                                <span>Forbid external <code>script src="http(s)://…"</code></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="mt-4">
+                    <label className="mb-2 block text-sm opacity-80">User Prompt</label>
+                    <textarea
+                        rows={4} value={userPrompt} onChange={(e) => setUserPrompt(e.target.value)}
+                        placeholder="Describe the site you want…"
+                        className="w-full resize-y rounded-2xl border border-slate-800/70 bg-slate-950/60 px-4 py-3 text-sm leading-relaxed outline-none placeholder:opacity-40 focus:border-slate-500"
+                    />
+                </div>
+            </section>
+
+            {/* WORKFLOW LOG (hero mirrors this) */}
+            <section className={`mx-auto w-full max-w-5xl px-6 pb-24 ${PANEL_CLASS} p-4 md:p-6`}>
+                <h2 className="mb-2 text-sm font-semibold opacity-80">Workflow Log</h2>
+                <pre className="min-h-24 whitespace-pre-wrap rounded-xl border border-slate-800/70 bg-slate-950/50 p-4 text-xs leading-relaxed text-slate-200">
+                    {status || "Idle"}
+                </pre>
+            </section>
         </div>
     );
 }
