@@ -8,8 +8,12 @@ export async function GET() {
         const r = await fetch(`${OLLAMA_HOST}/api/tags`, { cache: "no-store" });
         if (!r.ok) return NextResponse.json([], { status: r.status });
 
-        const data = await r.json(); // { models: [ { name, ... }, ... ] }
-        const names = Array.isArray(data?.models) ? data.models.map((m: any) => m.name).filter(Boolean) : [];
+        const data = (await r.json()) as { models?: { name?: string | null }[] };
+        const names = Array.isArray(data?.models)
+            ? data.models
+                  .map((model) => model?.name)
+                  .filter((name): name is string => Boolean(name && name.trim().length > 0))
+            : [];
         return NextResponse.json(names);
     } catch {
         // Fallback to a couple of known tags if Ollama is down

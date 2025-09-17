@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { callAi } from "../lib/ollama";
+import { slugify } from "../lib/slug";
 
 type Plan = { site_title?: string; pages: { id: string; title: string; purpose?: string }[]; };
 type PagePlan = {
@@ -14,6 +15,26 @@ type PagePlan = {
     interactions?: string[];
     seo?: { title?: string; description?: string; keywords?: string[] };
 };
+type DesignTokens = {
+    palette?: Record<string, string>;
+    spacing?: Record<string, string>;
+    radii?: Record<string, string>;
+    shadows?: Record<string, string>;
+    font_stack?: { heading?: string; body?: string; mono?: string; [key: string]: string | undefined };
+    [key: string]: unknown;
+};
+type SeoMetaPage = {
+    page_id: string;
+    open_graph: string[];
+    twitter: string[];
+    extra?: string[];
+};
+type SeoArtifacts = {
+    sitemap: string;
+    robots: string;
+    pages: SeoMetaPage[];
+};
+
 type BuiltPage = { id: string; title: string; html: string; valid: boolean; issues: string[]; thinking: string[]; };
 type SharedLayout = { header: string; footer: string; siteTitle?: string; thinking: string[]; };
 
@@ -27,15 +48,64 @@ type LiveStreamState = {
     history: { id: string; text: string; timestamp: number }[];
 };
 
-const DEFAULT_PREPROMPT =
-    `You are an expert full-stack product engineer and web designer.
-- Prefer semantic HTML5 with inline <style> and optional inline <script>.
-- Produce self-contained pages without external assets or imports.
-- Keep CSS minimal, modern, and accessible (dark-friendly).
-- If asked for multiple pages, each page should be stand-alone HTML (doctype, html, head, body).
-- Use a simple top <header> with the site title and a nav placeholder (no external links).`;
+const DEFAULT_PREPROMPT = [
+    "You are **Website Builder AI — Vanilla Web Deluxe**.",
+    "Your job: design and ship **beautiful, cohesive, production-grade websites** using **only HTML5, CSS3, and vanilla JavaScript (ES6+)**.",
+    "**No frameworks, no build tools, no external assets/CDNs.** Deliver self-contained files only.",
+    "",
+    "## Principles (in order)",
+    "Aesthetic polish → Correctness → Clarity → Maintainability → Performance → Accessibility → Security.",
+    "",
+    "## Layout & Design Charter",
+    "- **Comprehensive visual system**: define CSS custom properties in :root (colors, spacing, radii, shadows, typography scale).",
+    "- **Responsive grid**: use modern **Flexbox/Grid**; max content width ~1200–1280px with fluid padding; sensible section rhythm (e.g., 64–96px).",
+    "- **Typography**: system UI stack; use 'clamp()' for fluid headings; consistent line-height and vertical rhythm.",
+    "- **Color & contrast**: dark-friendly by default; minimum 4.5:1 contrast for body text; obvious focus outlines.",
+    "- **Components**: cohesive header (sticky), nav with active state, hero, cards, buttons, forms, sections, and a real footer (contact/CTA).",
+    "- **Micro-interactions**: small CSS transitions only (opacity/transform). Respect 'prefers-reduced-motion'.",
+    "- **Naming**: simple/BEM-like classes (e.g., .btn, .btn--primary, .card, .section).",
+    "",
+    "## Technology constraints",
+    "- Only **inline <style>** and optional **inline <script>** per page.",
+    "- Use **semantic HTML** and landmarks (<header>, <nav>, <main>, <section>, <footer>).",
+    "- **No** external <script src=\"http…\">, <link rel=\"stylesheet\">, frameworks, or imports.",
+    "- Prefer **inline SVG** over bitmap images; if images are unavoidable, keep small (<=200KB) and include alt text.",
+    "",
+    "## Quality gates (must pass)",
+    "- HTML includes <!doctype html>, <html lang=\"en\">, <head> with <meta charset=\"utf-8\"> and a usable <title>.",
+    "- **No console errors**, no broken internal links, no layout overlap on common widths (360px, 768px, 1024px, 1280px).",
+    "- Keyboard navigation works; all interactive elements are focusable; forms have associated <label>.",
+    "- Consistent spacing scale; consistent radii/shadows; no 'ugly defaults' (unstyled anchors, misaligned grids, etc.).",
+    "",
+    "## Workflow (always)",
+    "1) **PLAN** → return **only valid JSON**:",
+    "   {",
+    "     \"pages\":[{\"id\":\"kebab\",\"title\":\"…\",\"purpose\":\"…\"}],",
+    "     \"routes\":[], \"components\":[], \"data\":{}, \"apis\":[], \"deps\":[],",
+    "     \"acceptance\":[], \"risks\":[],",
+    "     \"targets\":{\"a11y\":{\"minContrast\":4.5,\"requireMain\":true},\"perf\":{\"maxImgKB\":200},\"seo\":{\"titleLen\":[30,60]}}",
+    "   }",
+    "2) **BUILD** → for each page, output a **single self-contained HTML document**:",
+    "   - Reuse shared header/footer if provided.",
+    "   - Include a tidy **<style>** block with tokens (CSS variables) and a small **<script>** only if needed.",
+    "   - Use a responsive grid, clear section hierarchy, and polished component styling.",
+    "3) **VALIDATE & FIX** → mentally compile: resolve missing imports (should be none), nav mismatches, a11y issues, and any layout glitches. If issues exist, output **only the corrected full HTML** and a 3–6 bullet summary of what changed.",
+    "",
+    "## Creativity policy",
+    "- You **may** introduce tasteful enhancements (hero composition, gradient accents, subtle glass/blur, decorative SVG patterns, empty-state illustrations) if they improve clarity and aesthetics—still pure CSS/JS/HTML.",
+    "- Avoid heavy animations; keep interactions delightful but restrained.",
+    "",
+    "## Security & performance",
+    "- Sanitize any dynamic text before inserting into the DOM.",
+    "- Avoid layout thrash; prefer CSS for styling over JS; throttle/debounce any scroll/resize handlers.",
+    "",
+    "## Output discipline",
+    "- Be decisive; pick sensible defaults when unspecified and state them briefly.",
+    "- Output only what’s requested (JSON or full HTML documents). No markdown fences unless explicitly asked.",
+    "- **Thinking policy**: Do not output <think>…</think> unless explicitly allowed; if allowed, keep it short and bulleted.",
+].join("\n");
 
-const DEFAULT_USER_PROMPT = `Build a minimal website for a small repair shop that sells cases and does phone repairs.
+const DEFAULT_USER_PROMPT = `Build a website for a repair shop that sells cases and does phone repairs.
 Tone: professional, friendly.
 Target pages: suggest a realistic set for this business.`;
 
@@ -126,6 +196,25 @@ Brand/voice context:
 ${brandContext}
 `;
 
+const buildDesignTokensPrompt = (siteTitle: string | undefined, userPrompt?: string) => `
+You are defining concise design tokens for the site "${siteTitle || "Generated Site"}".
+
+Return ONLY JSON with this exact top-level shape:
+{
+  "palette": { "background": string, "surface": string, "primary": string, "secondary": string, "accent": string, "text": string, "muted": string },
+  "spacing": { "xs": string, "sm": string, "md": string, "lg": string, "xl": string },
+  "radii": { "sm": string, "md": string, "lg": string },
+  "shadows": { "soft": string, "strong": string },
+  "font_stack": { "heading": string, "body": string, "mono": string }
+}
+
+Guidelines:
+- Use CSS-friendly token values (px / rem for spacing, rgba/hex for colors).
+- Keep palette dark-friendly with sufficient contrast between background, surface, and text.
+- Derive tone and vocabulary from this brief:
+${userPrompt || DEFAULT_USER_PROMPT}
+`;
+
 const buildFixPrompt = (siteTitle: string, pageTitle: string, issues: string[], html: string) => `
 You produced a self-contained HTML document for "${pageTitle}" on the site "${siteTitle}", but it failed validation.
 
@@ -137,6 +226,71 @@ Here is your previous attempt (for reference):
 ---
 ${html}
 ---
+`;
+
+const buildA11yFixPrompt = (siteTitle: string, pageTitle: string, issues: string[], html: string) => `
+You delivered an HTML page for "${pageTitle}" on the site "${siteTitle}", but it failed the accessibility audit.
+
+Accessibility issues to address:
+${issues.map((issue) => `- ${issue}`).join("\n")}
+
+Return ONLY the updated HTML document with minimal edits that resolve the issues. Keep the existing structure, styles, and copy; modify only the necessary attributes/elements. Do not introduce new frameworks or external assets.
+Here is the current HTML:
+---
+${html}
+---
+`;
+
+const buildLinkFixPrompt = (
+    siteTitle: string,
+    pageTitle: string,
+    brokenLinks: { href: string; text?: string | null }[],
+    html: string,
+    knownPages: { id: string; title: string }[],
+) => `
+You produced the page "${pageTitle}" for the site "${siteTitle}", but some internal navigation links point to non-existent files.
+
+Existing pages (id → file → title):
+${knownPages.map(({ id, title }) => `- ${id} → ${id}.html → ${title}`).join("\n")}
+
+Invalid links to correct:
+${brokenLinks.map((link) => `- href="${link.href}"${link.text ? ` (text: ${link.text})` : ""}`).join("\n")}
+
+Return ONLY the revised HTML document. Adjust only the href values necessary so each link resolves to one of the valid pages above. Do not change other content or structure.
+Here is the current HTML:
+---
+${html}
+---
+`;
+
+const buildSeoPackPrompt = (
+    siteTitle: string | undefined,
+    pages: { id: string; title: string; purpose?: string }[],
+    baseUrl: string,
+) => `
+You are generating final SEO helpers for the site "${siteTitle || "Generated Site"}".
+
+Return ONLY JSON shaped exactly as:
+{
+  "sitemap": string,
+  "robots": string,
+  "pages": [
+    {
+      "page_id": string,
+      "open_graph": string[],
+      "twitter": string[],
+      "extra"?: string[]
+    }
+  ]
+}
+
+Requirements:
+- sitemap must be valid XML referencing ${baseUrl}<page>.html for the ids below.
+- robots should allow all agents except explicitly disallowed sections if needed; include sitemap URL on its last line.
+- For each page, provide Open Graph meta tags (title, description, type, url, image placeholder) and Twitter card tags (card type, title, description, image).
+- Include a concise meta description tag (name="description") in the "extra" array when helpful.
+- Use the provided page intents as guidance:
+${pages.map((p) => `- ${p.title} (${p.id}.html) -> ${p.purpose || "General page"}`).join("\n")}
 `;
 
 // ---------- Existing builder prompts ----------
@@ -154,18 +308,95 @@ User goal/context:
 ${userPrompt || DEFAULT_USER_PROMPT}
 `;
 
-const buildSharedLayoutPrompt = (pageEstimate: number, userPrompt?: string) => `
-Design a shared header and footer for the upcoming site. Return ONLY JSON shaped exactly as { "site_title": string, "header": string, "footer": string }.
+const buildSharedLayoutPrompt = (
+  pageEstimate: number,
+  userPrompt?: string,
+  tokens?: DesignTokens | null
+) => {
+  // ✅ Default tokens that match DesignTokens exactly
+  const tk: DesignTokens = tokens ?? {
+    palette: {
+      background: "#0b1220",
+      surface: "#0f172a",
+      primary: "#38bdf8",
+      secondary: "#a78bfa",
+      accent: "#22d3ee",
+      text: "#e6edf6",
+      muted: "#94a3b8",
+    },
+    spacing: { xs: "6px", sm: "10px", md: "14px", lg: "18px", xl: "24px" },
+    radii: { sm: "8px", md: "14px", lg: "22px" },
+    shadows: {
+      soft: "0 1px 2px rgba(0,0,0,.25)",
+      strong: "0 10px 30px rgba(2,6,23,.35)",
+    },
+    font_stack: {
+      heading:
+        'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+      body:
+        'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+      mono: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+    },
+  };
 
-Expectations:
-- header/footer are HTML snippets (no <!doctype>, <html>, or <body>).
-- Keep styles minimal and scoped.
-- Header must have site title + <nav data-shared-nav> with ${pageEstimate} <a data-nav-slot="n" href="#page-n">Label n</a>.
-- Footer includes concise contact/CTA.
+  // Safely pull fields (fallbacks included)
+  const p = tk.palette ?? {};
+  const s = tk.spacing ?? {};
+  const r = tk.radii ?? {};
+  const sh = tk.shadows ?? {};
+  const f = tk.font_stack ?? {};
+
+  const tokensHint = `
+Design tokens (use as CSS variables or hard values):
+- Colors: background ${p.background ?? "#0b1220"}, surface ${p.surface ?? "#0f172a"}, text ${p.text ?? "#e6edf6"}, primary ${p.primary ?? "#38bdf8"}, secondary ${p.secondary ?? "#a78bfa"}, accent ${p.accent ?? p.primary ?? "#38bdf8"}, muted ${p.muted ?? "#94a3b8"}
+- Font: heading "${f.heading ?? "system-ui"}"; body "${f.body ?? "system-ui"}"; mono "${f.mono ?? "ui-monospace"}"
+- Radii: sm ${r.sm ?? "8px"}, md ${r.md ?? "14px"}, lg ${r.lg ?? "22px"}
+- Spacing scale: xs ${s.xs ?? "6px"}, sm ${s.sm ?? "10px"}, md ${s.md ?? "14px"}, lg ${s.lg ?? "18px"}, xl ${s.xl ?? "24px"}
+- Shadows: soft "${sh.soft ?? "0 1px 2px rgba(0,0,0,.25)"}"; strong "${sh.strong ?? "0 10px 30px rgba(2,6,23,.35)"}"
+`.trim();
+
+  return `
+Design a **polished, responsive, sticky header and a cohesive footer** for a vanilla HTML/CSS/JS site.
+Return **ONLY JSON** shaped exactly as:
+{ "site_title": string, "header": string, "footer": string }
+
+### Hard requirements
+- The **header snippet** must contain:
+  - <header class="site-header" data-shared>
+    - a container with the site title element <a class="brand">…</a>
+    - <nav data-shared-nav> with EXACTLY ${pageEstimate} link placeholders:
+      <a data-nav-slot="n" href="#page-n" data-active="false">Label n</a>
+  - a **<style>** block scoped to .site-header and related classes (no global resets)
+  - The header is **sticky**: position: sticky; top: 0; z-index: 50; backdrop blur; subtle border-bottom & shadow
+  - Active link styling must target BOTH [aria-current="page"] and [data-active="true"] (accent color, underline/indicator)
+  - Focus states with :focus-visible are clearly visible and meet contrast
+  - Responsive layout:
+    - max content width ~1200–1280px with fluid side padding
+    - nav wraps to a horizontal scroll or collapses gracefully on small screens (no frameworks)
+- The **footer snippet** must contain:
+  - <footer class="site-footer" data-shared>
+    - contact/CTA line, small print, and a “back to top” anchor
+  - a **<style>** block scoped to .site-footer
+- **No** <!doctype>, <html>, or <body> tags (snippets only).
+- **No** external assets (no <link> or external <script>).
+
+### Visual & interaction guidance
+- Dark-friendly design using the tokens below; ensure 4.5:1 contrast for body text.
+- Use CSS vars at the top of the header/footer styles (define if missing), e.g.:
+  :root { --bg:${p.background ?? "#0b1220"}; --surface:${p.surface ?? "#0f172a"}; --fg:${p.text ?? "#e6edf6"}; --primary:${p.primary ?? "#38bdf8"}; --muted:${p.muted ?? "#94a3b8"}; --accent:${p.accent ?? p.primary ?? "#38bdf8"}; --radius:${r.md ?? "14px"}; --font-heading:${(f.heading ?? "system-ui").replace(/"/g, '\\"')}; --font-body:${(f.body ?? "system-ui").replace(/"/g, '\\"')}; }
+- Spacing uses a consistent scale; rounded corners with ${r.md ?? "14px"}; subtle hover/focus transitions (opacity/transform only); respect prefers-reduced-motion.
+
+${tokensHint}
+
+### Output rules
+- Keep CSS tidy and scoped (.site-header, .site-footer).
+- Include just enough HTML structure to drop into pages.
+- Do not include markdown fences, comments, or explanations—**JSON only** as specified.
 
 User goal/context:
-${userPrompt || DEFAULT_USER_PROMPT}
-`;
+${userPrompt || ""}
+`.trim();
+};
 
 const buildPagePrompt = (
     siteTitle: string,
@@ -173,13 +404,13 @@ const buildPagePrompt = (
     pagePlan: PagePlan | null,
     layout: SharedLayout | null,
     allPages: { id: string; title: string }[],
+    tokens: DesignTokens | null,
 ) => {
-    const layoutGuidance = layout
-        ? `- Reuse the shared header/footer provided below without changing their structure.
-- Replace every <a data-nav-slot> so it links to the exact page list (href="<id>.html"); visually indicate "${page.id}" as active.
-`
-        : `- Include a simple <header> with "${siteTitle}" and a nav placeholder.
-`;
+const layoutGuidance = layout
+  ? `- Reuse the shared header/footer provided below without changing their structure.
+- Replace every <a data-nav-slot> so it links to the exact page list (href="<id>.html").
+- For the current page "${page.id}", set aria-current="page" AND data-active="true" on its nav link.`
+  : `- Include a simple <header> with "${siteTitle}" and a nav placeholder.`;
 
     const sharedChromeSnippet = layout
         ? `Shared header snippet:
@@ -201,6 +432,38 @@ Per-page plan to implement:
 - SEO: ${pagePlan.seo?.title || ""} — ${pagePlan.seo?.description || ""}
 ` : "";
 
+    const tokensSummary = tokens
+        ? (() => {
+            const lines: string[] = [];
+            if (tokens.palette) {
+                const palettePairs = Object.entries(tokens.palette).map(([key, value]) => `${key}: ${value}`).join(", ");
+                if (palettePairs) lines.push(`Palette → ${palettePairs}`);
+            }
+            if (tokens.spacing) {
+                const spacingPairs = Object.entries(tokens.spacing).map(([key, value]) => `${key}: ${value}`).join(", ");
+                if (spacingPairs) lines.push(`Spacing scale → ${spacingPairs}`);
+            }
+            if (tokens.radii) {
+                const radiiPairs = Object.entries(tokens.radii).map(([key, value]) => `${key}: ${value}`).join(", ");
+                if (radiiPairs) lines.push(`Radii → ${radiiPairs}`);
+            }
+            if (tokens.shadows) {
+                const shadowPairs = Object.entries(tokens.shadows).map(([key, value]) => `${key}: ${value}`).join(", ");
+                if (shadowPairs) lines.push(`Shadows → ${shadowPairs}`);
+            }
+            if (tokens.font_stack) {
+                const fontPairs = Object.entries(tokens.font_stack).map(([key, value]) => `${key}: ${value}`).join(", ");
+                if (fontPairs) lines.push(`Fonts → ${fontPairs}`);
+            }
+            return lines.length
+                ? `
+Design tokens (apply consistently):
+${lines.map((line) => `- ${line}`).join("\n")}
+`
+                : "";
+        })()
+        : "";
+
     return `
 Generate a single, self-contained HTML5 document for the page below.
 
@@ -211,6 +474,7 @@ Constraints:
 - The page must be fully functional if saved as a standalone .html file.
 ${layoutGuidance}- Use the page "purpose" to drive content. Avoid lorem ipsum.
 ${planning}
+${tokensSummary}
 Site navigation targets:
 ${navList}
 
@@ -254,8 +518,10 @@ export default function AutoBuilder() {
 
     const [plan, setPlan] = useState<Plan | null>(null);
     const [sharedLayout, setSharedLayout] = useState<SharedLayout | null>(null);
+    const [designTokens, setDesignTokens] = useState<DesignTokens | null>(null);
+    const [seoArtifacts, setSeoArtifacts] = useState<SeoArtifacts | null>(null);
     const [pages, setPages] = useState<BuiltPage[]>([]);
-    const [pagePlans, setPagePlans] = useState<Record<string, PagePlan>>({});
+    const [exportHref, setExportHref] = useState<string | null>(null);
 
     const [stepIndex, setStepIndex] = useState<number>(-1);
 
@@ -307,8 +573,10 @@ export default function AutoBuilder() {
     const resetAll = () => {
         setPlan(null);
         setSharedLayout(null);
+        setDesignTokens(null);
+        setSeoArtifacts(null);
         setPages([]);
-        setPagePlans({});
+        setExportHref(null);
         setStatus("");
         setStatusLines([]);
         setStepIndex(-1);
@@ -350,6 +618,138 @@ export default function AutoBuilder() {
         return { valid: issues.length === 0, issues };
     };
 
+    const runAccessibilityAudit = (html: string) => {
+        const issues: string[] = [];
+        try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, "text/html");
+
+            if (!doc.querySelector("main")) {
+                issues.push("Missing <main> landmark for primary content.");
+            }
+
+            const labelForIds = new Set<string>();
+            doc.querySelectorAll("label[for]").forEach((label) => {
+                const target = label.getAttribute("for");
+                if (target) labelForIds.add(target);
+            });
+
+            const unlabeledControls: string[] = [];
+            const controlSelector = "input, select, textarea";
+            doc.querySelectorAll(controlSelector).forEach((element) => {
+                const tag = element.tagName.toLowerCase();
+                const type = element.getAttribute("type")?.toLowerCase();
+                if (tag === "input" && ["hidden", "submit", "button", "reset"].includes(type || "")) return;
+
+                const ariaLabel = element.getAttribute("aria-label");
+                const ariaLabelledBy = element.getAttribute("aria-labelledby");
+                const id = element.getAttribute("id");
+
+                let labeled = Boolean(ariaLabel && ariaLabel.trim().length > 0);
+
+                if (!labeled && ariaLabelledBy) {
+                    const ids = ariaLabelledBy.split(/\s+/).filter(Boolean);
+                    labeled = ids.some((labelId) => Boolean(doc.getElementById(labelId)));
+                }
+
+                if (!labeled && id && labelForIds.has(id)) {
+                    labeled = true;
+                }
+
+                if (!labeled) {
+                    const ancestorLabel = element.closest?.("label");
+                    if (ancestorLabel) labeled = true;
+                }
+
+                if (!labeled) {
+                    unlabeledControls.push(`${tag}${id ? `#${id}` : ""}`);
+                }
+            });
+
+            if (unlabeledControls.length > 0) {
+                issues.push(`Form controls missing accessible label: ${unlabeledControls.join(", ")}`);
+            }
+
+            const imagesMissingAlt: string[] = [];
+            doc.querySelectorAll("img").forEach((img, index) => {
+                const alt = img.getAttribute("alt");
+                const role = img.getAttribute("role");
+                const ariaHidden = img.getAttribute("aria-hidden");
+                if (ariaHidden === "true" || role === "presentation") return;
+                if (!alt || alt.trim().length === 0) {
+                    const id = img.getAttribute("id");
+                    imagesMissingAlt.push(id ? `img#${id}` : `img[index ${index}]`);
+                }
+            });
+            if (imagesMissingAlt.length > 0) {
+                issues.push(`Images missing descriptive alt text: ${imagesMissingAlt.join(", ")}`);
+            }
+
+            const outlinePattern = /outline\s*:\s*(none|0(?:px)?)/i;
+            const styleTags = Array.from(doc.querySelectorAll("style"));
+            const strippedStyles = styleTags.map((style) => style.textContent || "").join("\n");
+            let outlineRemoved = outlinePattern.test(strippedStyles);
+            if (!outlineRemoved) {
+                outlineRemoved = Array.from(doc.querySelectorAll("[style]")).some((el) => {
+                    const styleAttr = el.getAttribute("style") || "";
+                    return outlinePattern.test(styleAttr);
+                });
+            }
+            if (outlineRemoved) {
+                issues.push("Detected CSS that removes focus outlines (outline: none/0).");
+            }
+        } catch {
+            issues.push("Could not parse HTML for accessibility audit.");
+        }
+        return issues;
+    };
+
+    const checkCrossPageLinks = (built: BuiltPage[]) => {
+        const issues: Record<string, { href: string; text?: string | null }[]> = {};
+        try {
+            const parser = new DOMParser();
+            const targets = new Set(built.map((page) => `${page.id}.html`));
+
+            built.forEach((page) => {
+                try {
+                    const doc = parser.parseFromString(page.html, "text/html");
+                    const broken: { href: string; text?: string | null }[] = [];
+                    doc.querySelectorAll("a[href]").forEach((anchor) => {
+                        const rawHref = anchor.getAttribute("href") || "";
+                        if (!rawHref) return;
+                        if (/^(https?:|mailto:|tel:|#)/i.test(rawHref)) return;
+                        const cleaned = rawHref.replace(/^\.\//, "").split(/[?#]/)[0];
+                        if (!/\.html$/i.test(cleaned)) return;
+                        if (!targets.has(cleaned)) {
+                            broken.push({ href: rawHref, text: anchor.textContent?.trim() || null });
+                        }
+                    });
+                    if (broken.length) issues[page.id] = broken;
+                } catch {
+                    // Ignore parsing issues for this page.
+                }
+            });
+        } catch {
+            // DOMParser unavailable (should not happen in client runtime)
+        }
+        return issues;
+    };
+
+    const injectMetaTags = (html: string, tags: string[]) => {
+        if (!tags?.length) return html;
+        const trimmed = tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0);
+        if (!trimmed.length) return html;
+        const unique = trimmed.filter((tag, index, arr) => arr.indexOf(tag) === index);
+        const newTags = unique.filter((tag) => !html.includes(tag));
+        if (!newTags.length) return html;
+        const closeHeadIndex = html.search(/<\/head>/i);
+        const injection = `${newTags.join("\n")}\n`;
+        if (closeHeadIndex === -1) {
+            return `${html}\n${injection}`;
+        }
+        return `${html.slice(0, closeHeadIndex)}${injection}${html.slice(closeHeadIndex)}`;
+    };
+
     // Compose optional Ollama options
     const aiOptions = useMemo(() => {
         return useCustomCtx ? { options: { num_ctx: Math.max(1024, Math.floor(ctxLen)) } } : {};
@@ -361,9 +761,14 @@ export default function AutoBuilder() {
 
         // Reset
         setStatus(""); setStatusLines([]);
-        setPages([]); setPagePlans({});
+        setPages([]);
         setPlan(null); setSharedLayout(null);
+        setDesignTokens(null); setSeoArtifacts(null);
+        setExportHref(null);
         setStepIndex(0); setLiveStream(null); setIsThinking(false);
+
+        let tokensForBuild: DesignTokens | null = null;
+        let seoPack: SeoArtifacts | null = null;
 
         try {
             // 1) Shared layout
@@ -409,10 +814,30 @@ export default function AutoBuilder() {
             log(`→ Planned ${normalisedPlan.pages.length} page(s).`);
             setStepIndex(2);
 
+            log("   • Deriving design tokens…");
+            const tokensLabel = "Generating design tokens";
+            beginLiveStream("plan", tokensLabel);
+            const tokensRaw = await callAi(
+                model,
+                buildDesignTokensPrompt(normalisedPlan.site_title || sharedChrome.siteTitle, userPrompt),
+                { prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("plan", tokensLabel, c), ...aiOptions },
+            );
+
+            try {
+                const parsedTokens = JSON.parse(extractJsonObject(tokensRaw)) as DesignTokens;
+                tokensForBuild = parsedTokens;
+                setDesignTokens(parsedTokens);
+                log("→ Design tokens captured.");
+            } catch {
+                throw new Error("Could not parse design tokens JSON");
+            }
+
             // 3) Per page — PLAN → BUILD → VALIDATE/FIX
             const builtPages: BuiltPage[] = [];
             const allNav = normalisedPlan.pages.map(({ id, title }) => ({ id, title }));
             const brandContext = userPrompt;
+            const siteLabel = normalisedPlan.site_title || sharedChrome.siteTitle || "My Site";
+            const siteSlug = slugify(siteLabel);
 
             for (const p of normalisedPlan.pages) {
                 // 3a) Page plan
@@ -421,14 +846,13 @@ export default function AutoBuilder() {
                 beginLiveStream("page", planLabel);
                 const pagePlanRaw = await callAi(
                     model,
-                    buildPagePlanPrompt(normalisedPlan.site_title || sharedChrome.siteTitle || "My Site", p, allNav, brandContext),
+                    buildPagePlanPrompt(siteLabel, p, allNav, brandContext),
                     { prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("page", planLabel, c), ...aiOptions },
                 );
 
                 let pagePlan: PagePlan;
                 try { pagePlan = JSON.parse(extractJsonObject(pagePlanRaw)) as PagePlan; }
                 catch { throw new Error(`Could not parse page plan for ${p.title}`); }
-                setPagePlans((prev) => ({ ...prev, [p.id]: pagePlan }));
                 log(`→ Page plan ready for "${p.title}".`);
 
                 // 3b) Build code
@@ -437,7 +861,7 @@ export default function AutoBuilder() {
                 beginLiveStream("page", buildLabel);
                 const htmlRaw = await callAi(
                     model,
-                    buildPagePrompt(normalisedPlan.site_title || sharedChrome.siteTitle || "My Site", p, pagePlan, sharedChrome, allNav),
+                    buildPagePrompt(siteLabel, p, pagePlan, sharedChrome, allNav, tokensForBuild || designTokens),
                     { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", buildLabel, c), ...aiOptions },
                 );
                 let { cleaned: html, thoughts } = stripThinkingArtifacts(htmlRaw);
@@ -452,7 +876,7 @@ export default function AutoBuilder() {
                     beginLiveStream("page", fixLabel);
                     const fixedRaw = await callAi(
                         model,
-                        buildFixPrompt(normalisedPlan.site_title || sharedChrome.siteTitle || "My Site", p.title, issues, html),
+                        buildFixPrompt(siteLabel, p.title, issues, html),
                         { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", fixLabel, c), ...aiOptions },
                     );
                     const processed = stripThinkingArtifacts(fixedRaw);
@@ -463,10 +887,40 @@ export default function AutoBuilder() {
                     issues = check.issues;
                 }
 
-                if (valid) {
+                let accessibilityIssues = runAccessibilityAudit(html);
+                if (accessibilityIssues.length > 0) {
+                    log(`   • Accessibility audit found issues: ${accessibilityIssues.join("; ")}`);
+                    const a11yFixLabel = `Patching accessibility for "${p.title}"`;
+                    beginLiveStream("page", a11yFixLabel);
+                    const a11yFixRaw = await callAi(
+                        model,
+                        buildA11yFixPrompt(siteLabel, p.title, accessibilityIssues, html),
+                        { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", a11yFixLabel, c), ...aiOptions },
+                    );
+                    const processedA11y = stripThinkingArtifacts(a11yFixRaw);
+                    html = processedA11y.cleaned;
+                    thoughts = [...thoughts, ...processedA11y.thoughts];
+                    const structuralAfterPatch = validateHtml(html);
+                    valid = structuralAfterPatch.valid;
+                    issues = structuralAfterPatch.issues;
+                    accessibilityIssues = runAccessibilityAudit(html);
+                    if (accessibilityIssues.length === 0) {
+                        log("   • Accessibility patch ✅ Issues resolved.");
+                    }
+                }
+
+                if (accessibilityIssues.length > 0) {
+                    const tagged = accessibilityIssues.map((issue) => `Accessibility: ${issue}`);
+                    issues = [...issues, ...tagged];
+                    valid = false;
+                    log(`   • Accessibility audit ⚠️ Remaining issues: ${accessibilityIssues.join("; ")}`);
+                }
+
+                if (valid && issues.length === 0) {
                     log(`   • "${p.title}" ✅ Passed validation.`);
                 } else {
-                    log(`   • "${p.title}" ⚠️ Still has issues: ${issues.join("; ")}`);
+                    const detail = issues.length ? issues.join("; ") : "Unknown validation issues";
+                    log(`   • "${p.title}" ⚠️ Still has issues: ${detail}`);
                 }
 
                 const built = { id: p.id, title: p.title, html, valid, issues, thinking: thoughts };
@@ -474,9 +928,132 @@ export default function AutoBuilder() {
                 setPages((prev) => [...prev, built]);
             }
 
-            // 4) Wrap-up
+            setStepIndex(3);
+
+            log("4) Delivery: running cross-page link audit…");
+            const initialCrossLinks = checkCrossPageLinks(builtPages);
+            let unresolvedLinks: Record<string, { href: string; text?: string | null }[]> = initialCrossLinks;
+            if (Object.keys(initialCrossLinks).length > 0) {
+                const brokenCount = Object.values(initialCrossLinks).reduce((sum, list) => sum + list.length, 0);
+                log(`   • Found ${brokenCount} broken link(s); issuing corrective pass.`);
+                for (const [pageId, brokenList] of Object.entries(initialCrossLinks)) {
+                    const target = builtPages.find((page) => page.id === pageId);
+                    if (!target || brokenList.length === 0) continue;
+                    const fixLabel = `Fixing cross-links for "${target.title}"`;
+                    beginLiveStream("page", fixLabel);
+                    const linkFixRaw = await callAi(
+                        model,
+                        buildLinkFixPrompt(siteLabel, target.title, brokenList, target.html, allNav),
+                        { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", fixLabel, c), ...aiOptions },
+                    );
+                    const processedFix = stripThinkingArtifacts(linkFixRaw);
+                    target.html = processedFix.cleaned;
+                    target.thinking = [...target.thinking, ...processedFix.thoughts];
+                }
+                unresolvedLinks = checkCrossPageLinks(builtPages);
+                if (Object.keys(unresolvedLinks).length === 0) {
+                    log("   • Cross-page links patched successfully.");
+                } else {
+                    const summary = Object.entries(unresolvedLinks)
+                        .map(([id, list]) => `${id}: ${list.map((item) => item.href).join(", ")}`)
+                        .join(" | ");
+                    log(`   • Cross-page links still unresolved: ${summary}`);
+                }
+            } else {
+                log("   • All cross-page links already valid ✅");
+                unresolvedLinks = {};
+            }
+
+            const baseUrl = `https://example.com/${siteSlug}/`;
+            log("   • Generating SEO/meta pack…");
+            const seoLabel = "Generating SEO pack";
+            beginLiveStream("plan", seoLabel);
+            const seoRaw = await callAi(
+                model,
+                buildSeoPackPrompt(siteLabel, normalisedPlan.pages, baseUrl),
+                { prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("plan", seoLabel, c), ...aiOptions },
+            );
+            try {
+                seoPack = JSON.parse(extractJsonObject(seoRaw)) as SeoArtifacts;
+                setSeoArtifacts(seoPack);
+                log("   • SEO assets prepared (sitemap, robots, meta tags).");
+            } catch {
+                seoPack = null;
+                log("   • Failed to parse SEO/meta pack JSON.");
+            }
+
+            if (seoPack) {
+                seoPack.pages.forEach((metaPage) => {
+                    const target = builtPages.find((page) => page.id === metaPage.page_id);
+                    if (!target) return;
+                    const combinedTags = [
+                        ...(metaPage.extra || []),
+                        ...(metaPage.open_graph || []),
+                        ...(metaPage.twitter || []),
+                    ];
+                    target.html = injectMetaTags(target.html, combinedTags);
+                });
+            }
+
+            builtPages.forEach((page) => {
+                const structural = validateHtml(page.html);
+                const a11y = runAccessibilityAudit(page.html);
+                const aggregateIssues = [...structural.issues];
+                if (a11y.length) aggregateIssues.push(...a11y.map((issue) => `Accessibility: ${issue}`));
+                page.issues = aggregateIssues;
+                page.valid = structural.valid && a11y.length === 0;
+            });
+
+            if (Object.keys(unresolvedLinks).length > 0) {
+                for (const [pageId, brokenList] of Object.entries(unresolvedLinks)) {
+                    const target = builtPages.find((page) => page.id === pageId);
+                    if (!target) continue;
+                    brokenList.forEach((item) => {
+                        const message = `Broken internal link: ${item.href}`;
+                        if (!target.issues.includes(message)) target.issues.push(message);
+                    });
+                    target.valid = false;
+                }
+            }
+
+            setPages([...builtPages]);
+
+            log("   • Packaging export bundle…");
+            try {
+                const exportFiles = builtPages.map((page) => ({ path: `${page.id}.html`, contents: page.html }));
+                const tokensSource = tokensForBuild || designTokens;
+                const seoSource = seoPack || seoArtifacts;
+                if (seoSource?.sitemap) exportFiles.push({ path: "sitemap.xml", contents: seoSource.sitemap.trim() });
+                if (seoSource?.robots) exportFiles.push({ path: "robots.txt", contents: seoSource.robots.trim() });
+                if (tokensSource) exportFiles.push({ path: "design-tokens.json", contents: JSON.stringify(tokensSource, null, 2) });
+                if (seoSource) exportFiles.push({ path: "meta-tags.json", contents: JSON.stringify(seoSource, null, 2) });
+
+                const response = await fetch("/api/export", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ siteSlug, files: exportFiles }),
+                });
+
+                if (!response.ok) {
+                    const text = await response.text().catch(() => "export failed");
+                    throw new Error(text || `Export failed (${response.status})`);
+                }
+
+                const data: { href?: string } = await response.json().catch(() => ({}));
+                if (data?.href) {
+                    setExportHref(data.href);
+                    log(`   • Export bundle ready: ${data.href}`);
+                } else {
+                    throw new Error("Missing download link in export response");
+                }
+            } catch (error: unknown) {
+                const message = error instanceof Error ? error.message : String(error ?? "Export error");
+                log(`   • Export bundle failed: ${message}`);
+                setExportHref(null);
+            }
+
             const bad = builtPages.filter((b) => !b.valid);
-            log(bad.length === 0 ? "4) Validation: all pages look OK ✅" : `4) Validation: ${bad.length} page(s) still have issues ⚠️`);
+            log(bad.length === 0 ? "5) Validation: all pages look OK ✅" : `5) Validation: ${bad.length} page(s) still have issues ⚠️`);
             setStepIndex(4);
             setTimeout(() => setStepIndex(STEPS.length), 120);
         } catch (error: unknown) {
@@ -593,13 +1170,24 @@ pages.forEach((page,i)=>{const btn=document.createElement('button');btn.type='bu
                                     Reset
                                 </button>
                                 {showPreviewCTA && (
-                                    <button
-                                        type="button"
-                                        onClick={handlePreviewClick}
-                                        className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:border-emerald-400 hover:bg-emerald-500/30"
-                                    >
-                                        Preview generated site
-                                    </button>
+                                    <>
+                                        <button
+                                            type="button"
+                                            onClick={handlePreviewClick}
+                                            className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:border-emerald-400 hover:bg-emerald-500/30"
+                                        >
+                                            Preview generated site
+                                        </button>
+                                        {exportHref && (
+                                            <a
+                                                href={exportHref}
+                                                download
+                                                className="rounded-xl border border-slate-700/70 bg-slate-900/60 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white"
+                                            >
+                                                Download zip
+                                            </a>
+                                        )}
+                                    </>
                                 )}
                             </div>
                         </div>
@@ -764,7 +1352,7 @@ pages.forEach((page,i)=>{const btn=document.createElement('button');btn.type='bu
                             </label>
                             <label className="inline-flex items-center gap-2 col-span-2">
                                 <input type="checkbox" checked={ruleFlags.noExternalScript} onChange={e => setRuleFlags(f => ({ ...f, noExternalScript: e.target.checked }))} className="h-4 w-4 accent-sky-500" />
-                                <span>Forbid external <code>script src="http(s)://…"</code></span>
+                                <span>Forbid external <code>script src=&quot;http(s)://…&quot;</code></span>
                             </label>
                         </div>
                     </div>

@@ -1,6 +1,8 @@
-import { NextRequest } from "next/server";
+type OllamaTagResponse = {
+    models?: { name?: string | null }[];
+};
 
-export async function GET(req: NextRequest) {
+export async function GET() {
     try {
         const res = await fetch("http://127.0.0.1:11434/api/tags", {
             method: "GET",
@@ -9,13 +11,16 @@ export async function GET(req: NextRequest) {
             const text = await res.text();
             return new Response(JSON.stringify({ error: text }), { status: 500 });
         }
-        const data = await res.json();
+        const data: OllamaTagResponse = await res.json();
         // Ollama returns: { models: [{ name, modified_at, size, digest }, ...] }
-        const names = (data.models ?? []).map((m: any) => m.name);
+        const names = (data.models ?? [])
+            .map((model) => model?.name)
+            .filter((name): name is string => Boolean(name && name.trim().length > 0));
         return new Response(JSON.stringify({ models: names }), {
             headers: { "Content-Type": "application/json" },
         });
-    } catch (err: any) {
-        return new Response(JSON.stringify({ error: err?.message ?? "Unknown error" }), { status: 500 });
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        return new Response(JSON.stringify({ error: message }), { status: 500 });
     }
 }
