@@ -1,11 +1,19 @@
 // /app/autobuilder/page.tsx
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { callAi } from "../lib/ollama";
 import { slugify } from "../lib/slug";
 
-type Plan = { site_title?: string; pages: { id: string; title: string; purpose?: string }[]; };
+type Plan = {
+    site_title?: string;
+    pages: {
+        id: string;
+        title: string;
+        purpose?: string
+    }[];
+};
+
 type PagePlan = {
     id: string;
     title: string;
@@ -15,28 +23,44 @@ type PagePlan = {
     interactions?: string[];
     seo?: { title?: string; description?: string; keywords?: string[] };
 };
+
 type DesignTokens = {
     palette?: Record<string, string>;
     spacing?: Record<string, string>;
     radii?: Record<string, string>;
     shadows?: Record<string, string>;
-    font_stack?: { heading?: string; body?: string; mono?: string; [key: string]: string | undefined };
+    font_stack?: { heading?: string; body?: string; mono?: string;[key: string]: string | undefined };
     [key: string]: unknown;
 };
+
 type SeoMetaPage = {
     page_id: string;
     open_graph: string[];
     twitter: string[];
     extra?: string[];
 };
+
 type SeoArtifacts = {
     sitemap: string;
     robots: string;
     pages: SeoMetaPage[];
 };
 
-type BuiltPage = { id: string; title: string; html: string; valid: boolean; issues: string[]; thinking: string[]; };
-type SharedLayout = { header: string; footer: string; siteTitle?: string; thinking: string[]; };
+type BuiltPage = {
+    id: string;
+    title: string;
+    html: string;
+    valid: boolean;
+    issues: string[];
+    thinking: string[];
+};
+
+type SharedLayout = {
+    header: string;
+    footer: string;
+    siteTitle?: string;
+    thinking: string[];
+};
 
 type LiveStreamPhase = "plan" | "layout" | "page";
 type LiveStreamState = {
@@ -46,6 +70,15 @@ type LiveStreamState = {
     cleaned: string;
     thoughts: string[];
     history: { id: string; text: string; timestamp: number }[];
+};
+
+type WizardVariant = "idea" | "plan" | "progress" | "preview";
+type WizardHeroState = {
+    title: string;
+    subtitle: string;
+    accent: string;
+    label: string;
+    variant: WizardVariant;
 };
 
 const DEFAULT_PREPROMPT = [
@@ -117,7 +150,6 @@ const STEPS = [
     { title: "Proofing the build", subtitle: "Running validation passes", accent: "from-emerald-500 via-teal-400 to-sky-400" },
 ];
 
-const COMPLETE_CARD = { title: "All set to launch", subtitle: "Your custom site is compiled and ready", accent: "from-emerald-500 via-teal-400 to-sky-400" };
 const PANEL_CLASS = "rounded-2xl border border-slate-800/70 bg-slate-900/60 backdrop-blur";
 
 /** Validation toggles */
@@ -309,44 +341,44 @@ ${userPrompt || DEFAULT_USER_PROMPT}
 `;
 
 const buildSharedLayoutPrompt = (
-  pageEstimate: number,
-  userPrompt?: string,
-  tokens?: DesignTokens | null
+    pageEstimate: number,
+    userPrompt?: string,
+    tokens?: DesignTokens | null
 ) => {
-  // ✅ Default tokens that match DesignTokens exactly
-  const tk: DesignTokens = tokens ?? {
-    palette: {
-      background: "#0b1220",
-      surface: "#0f172a",
-      primary: "#38bdf8",
-      secondary: "#a78bfa",
-      accent: "#22d3ee",
-      text: "#e6edf6",
-      muted: "#94a3b8",
-    },
-    spacing: { xs: "6px", sm: "10px", md: "14px", lg: "18px", xl: "24px" },
-    radii: { sm: "8px", md: "14px", lg: "22px" },
-    shadows: {
-      soft: "0 1px 2px rgba(0,0,0,.25)",
-      strong: "0 10px 30px rgba(2,6,23,.35)",
-    },
-    font_stack: {
-      heading:
-        'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-      body:
-        'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-      mono: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-    },
-  };
+    // ✅ Default tokens that match DesignTokens exactly
+    const tk: DesignTokens = tokens ?? {
+        palette: {
+            background: "#0b1220",
+            surface: "#0f172a",
+            primary: "#38bdf8",
+            secondary: "#a78bfa",
+            accent: "#22d3ee",
+            text: "#e6edf6",
+            muted: "#94a3b8",
+        },
+        spacing: { xs: "6px", sm: "10px", md: "14px", lg: "18px", xl: "24px" },
+        radii: { sm: "8px", md: "14px", lg: "22px" },
+        shadows: {
+            soft: "0 1px 2px rgba(0,0,0,.25)",
+            strong: "0 10px 30px rgba(2,6,23,.35)",
+        },
+        font_stack: {
+            heading:
+                'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+            body:
+                'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+            mono: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        },
+    };
 
-  // Safely pull fields (fallbacks included)
-  const p = tk.palette ?? {};
-  const s = tk.spacing ?? {};
-  const r = tk.radii ?? {};
-  const sh = tk.shadows ?? {};
-  const f = tk.font_stack ?? {};
+    // Safely pull fields (fallbacks included)
+    const p = tk.palette ?? {};
+    const s = tk.spacing ?? {};
+    const r = tk.radii ?? {};
+    const sh = tk.shadows ?? {};
+    const f = tk.font_stack ?? {};
 
-  const tokensHint = `
+    const tokensHint = `
 Design tokens (use as CSS variables or hard values):
 - Colors: background ${p.background ?? "#0b1220"}, surface ${p.surface ?? "#0f172a"}, text ${p.text ?? "#e6edf6"}, primary ${p.primary ?? "#38bdf8"}, secondary ${p.secondary ?? "#a78bfa"}, accent ${p.accent ?? p.primary ?? "#38bdf8"}, muted ${p.muted ?? "#94a3b8"}
 - Font: heading "${f.heading ?? "system-ui"}"; body "${f.body ?? "system-ui"}"; mono "${f.mono ?? "ui-monospace"}"
@@ -355,7 +387,7 @@ Design tokens (use as CSS variables or hard values):
 - Shadows: soft "${sh.soft ?? "0 1px 2px rgba(0,0,0,.25)"}"; strong "${sh.strong ?? "0 10px 30px rgba(2,6,23,.35)"}"
 `.trim();
 
-  return `
+    return `
 Design a **polished, responsive, sticky header and a cohesive footer** for a vanilla HTML/CSS/JS site.
 Return **ONLY JSON** shaped exactly as:
 { "site_title": string, "header": string, "footer": string }
@@ -406,11 +438,11 @@ const buildPagePrompt = (
     allPages: { id: string; title: string }[],
     tokens: DesignTokens | null,
 ) => {
-const layoutGuidance = layout
-  ? `- Reuse the shared header/footer provided below without changing their structure.
+    const layoutGuidance = layout
+        ? `- Reuse the shared header/footer provided below without changing their structure.
 - Replace every <a data-nav-slot> so it links to the exact page list (href="<id>.html").
 - For the current page "${page.id}", set aria-current="page" AND data-active="true" on its nav link.`
-  : `- Include a simple <header> with "${siteTitle}" and a nav placeholder.`;
+        : `- Include a simple <header> with "${siteTitle}" and a nav placeholder.`;
 
     const sharedChromeSnippet = layout
         ? `Shared header snippet:
@@ -524,17 +556,50 @@ export default function AutoBuilder() {
     const [exportHref, setExportHref] = useState<string | null>(null);
 
     const [stepIndex, setStepIndex] = useState<number>(-1);
+    const [wizardStep, setWizardStep] = useState<number>(0);
+    const [promptError, setPromptError] = useState<string | null>(null);
 
     // Live stream inside hero
     const [liveStream, setLiveStream] = useState<LiveStreamState | null>(null);
-    const [isThinking, setIsThinking] = useState(false);
-    const liveContainerRef = useRef<HTMLDivElement | null>(null);
+    const [activeInsight, setActiveInsight] = useState<"live" | "thoughts" | "log">("live");
 
-    const heroDetails = useMemo(() => {
-        if (stepIndex >= STEPS.length && pages.length > 0) return { ...COMPLETE_CARD, index: STEPS.length };
-        if (stepIndex >= 0) { const idx = Math.min(stepIndex, STEPS.length - 1); return { ...STEPS[idx], index: idx }; }
-        return { title: "Ready for your brief", subtitle: "Set requirements and start the automated build", accent: "from-slate-500 via-slate-400 to-slate-300", index: -1 };
-    }, [stepIndex, pages.length]);
+    const heroConfig = useMemo<WizardHeroState>(() => {
+        switch (wizardStep) {
+            case 0:
+                return {
+                    title: "What is your website about?",
+                    subtitle: "Describe the project and choose how many pages you need.",
+                    accent: "from-sky-500 via-indigo-500 to-purple-500",
+                    label: "Step 1 of 4",
+                    variant: "idea",
+                };
+            case 1:
+                return {
+                    title: "Review the generated plan",
+                    subtitle: "Confirm the outline before we continue building.",
+                    accent: "from-blue-500 via-sky-400 to-cyan-400",
+                    label: "Step 2 of 4",
+                    variant: "plan",
+                };
+            case 2:
+                return {
+                    title: "Generating your site",
+                    subtitle: "We’re crafting layout, pages, and checks. Watch the progress below.",
+                    accent: "from-purple-500 via-fuchsia-400 to-rose-400",
+                    label: "Step 3 of 4",
+                    variant: "progress",
+                };
+            case 3:
+            default:
+                return {
+                    title: "Preview and export",
+                    subtitle: "Open the generated experience or download the bundle.",
+                    accent: "from-emerald-500 via-teal-400 to-sky-400",
+                    label: "Step 4 of 4",
+                    variant: "preview",
+                };
+        }
+    }, [wizardStep]);
 
     const heroProgress = useMemo(() => {
         if (stepIndex < 0) return 0;
@@ -543,12 +608,79 @@ export default function AutoBuilder() {
     }, [stepIndex]);
 
     const showPreviewCTA = useMemo(() => pages.length > 0 && stepIndex >= STEPS.length, [pages.length, stepIndex]);
+    const generationInFlight = stepIndex >= 0 && stepIndex < STEPS.length;
+    const generationComplete = showPreviewCTA;
 
-    useEffect(() => {
-        const el = liveContainerRef.current;
-        if (!el) return;
-        el.scrollTop = el.scrollHeight;
-    }, [liveStream?.cleaned]);
+    const nextDisabled = useMemo(() => {
+        switch (wizardStep) {
+            case 0:
+                return generationInFlight || userPrompt.trim().length === 0;
+            case 1:
+                return !(plan?.pages?.length);
+            case 2:
+                return !generationComplete;
+            default:
+                return false;
+        }
+    }, [generationComplete, generationInFlight, plan?.pages?.length, userPrompt, wizardStep]);
+
+    const nextLabel = useMemo(() => {
+        if (wizardStep === 0) return "Start build";
+        if (wizardStep === 3) return "Start over";
+        return "Next";
+    }, [wizardStep]);
+
+    const insightItems = useMemo(
+        () => [
+            { id: "live" as const, label: "Live response", count: liveStream?.cleaned ? 1 : 0 },
+            { id: "thoughts" as const, label: "AI thinking", count: liveStream?.history.length ?? 0 },
+            { id: "log" as const, label: "Workflow log", count: Math.min(statusLines.length, 99) },
+        ],
+        [liveStream?.cleaned, liveStream?.history.length, statusLines.length],
+    );
+
+    const insightContent = useMemo(() => {
+        if (activeInsight === "live") {
+            if (!liveStream) {
+                return <p className="text-sm text-neutral-400">AI output will appear here once the build starts.</p>;
+            }
+            return (
+                <div className="space-y-3">
+                    <p className="text-[0.65rem] uppercase tracking-[0.3em] text-neutral-400">{liveStream.label}</p>
+                    <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
+                        {liveStream.cleaned || "Waiting for model output…"}
+                    </p>
+                </div>
+            );
+        }
+
+        if (activeInsight === "thoughts") {
+            const history = liveStream?.history ?? [];
+            if (history.length === 0) {
+                return <p className="text-sm text-neutral-400">No captured thinking yet.</p>;
+            }
+            return (
+                <ul className="space-y-2 text-sm text-neutral-200">
+                    {history.slice(-12).map((entry) => (
+                        <li key={entry.id} className="rounded-lg border border-slate-800/70 bg-slate-950/80 p-2">
+                            <span className="text-xs uppercase tracking-[0.2em] text-slate-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                            <p className="mt-1 whitespace-pre-wrap leading-relaxed text-neutral-100">{entry.text}</p>
+                        </li>
+                    ))}
+                </ul>
+            );
+        }
+
+        const logText = status.trim();
+        if (!logText) {
+            return <p className="text-sm text-neutral-400">No workflow log yet.</p>;
+        }
+        return (
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-relaxed text-slate-200">
+                {logText}
+            </pre>
+        );
+    }, [activeInsight, liveStream, status]);
 
     useEffect(() => {
         (async () => {
@@ -581,19 +713,17 @@ export default function AutoBuilder() {
         setStatusLines([]);
         setStepIndex(-1);
         setLiveStream(null);
-        setIsThinking(false);
+        setWizardStep(0);
+        setPromptError(null);
+        setActiveInsight("live");
     };
 
     // Live stream helpers
     const beginLiveStream = useCallback((phase: LiveStreamPhase, label: string) => {
         setLiveStream({ phase, label, raw: "", cleaned: "", thoughts: [], history: [] });
-        setIsThinking(false);
     }, []);
 
     const appendLiveStream = useCallback((phase: LiveStreamPhase, label: string, chunk: string) => {
-        if (chunk.includes("<think>")) setIsThinking(true);
-        if (chunk.includes("</think>")) setIsThinking(false);
-
         setLiveStream((prev) => {
             const raw = (prev && prev.phase === phase ? prev.raw : "") + chunk;
             const { cleaned, thoughts } = stripThinkingArtifacts(raw);
@@ -765,7 +895,7 @@ export default function AutoBuilder() {
         setPlan(null); setSharedLayout(null);
         setDesignTokens(null); setSeoArtifacts(null);
         setExportHref(null);
-        setStepIndex(0); setLiveStream(null); setIsThinking(false);
+        setStepIndex(0); setLiveStream(null);
 
         let tokensForBuild: DesignTokens | null = null;
         let seoPack: SeoArtifacts | null = null;
@@ -1063,6 +1193,36 @@ export default function AutoBuilder() {
     };
 
     // Preview dialog/tab (unchanged)
+    const handleNext = () => {
+        if (wizardStep === 0) {
+            if (generationInFlight) return;
+            if (userPrompt.trim().length === 0) {
+                setPromptError("Please describe your website before continuing.");
+                return;
+            }
+            setPromptError(null);
+            setWizardStep(1);
+            setActiveInsight("live");
+            void runWorkflow();
+            return;
+        }
+
+        if (wizardStep === 1) {
+            if (!plan?.pages?.length) return;
+            setWizardStep(2);
+            return;
+        }
+
+        if (wizardStep === 2) {
+            if (!generationComplete) return;
+            setWizardStep(3);
+            return;
+        }
+
+        resetAll();
+    };
+
+    // Preview dialog/tab (unchanged)
     const handlePreviewClick = useCallback(() => {
         if (pages.length === 0) return;
 
@@ -1141,106 +1301,171 @@ pages.forEach((page,i)=>{const btn=document.createElement('button');btn.type='bu
                 </div>
             </header>
 
-            {/* STATUS HERO (with Steps + Page Build live stream) */}
-            <section className="mx-auto w-full max-w-5xl px-6 py-6">
-                <div className="relative overflow-hidden rounded-3xl border border-slate-800/60 bg-slate-900/60 px-6 py-8 shadow-lg shadow-sky-950/30 backdrop-blur">
-                    <div className={`absolute inset-0 bg-gradient-to-r ${heroDetails.accent} opacity-30 blur-3xl`} />
-                    <div className="relative z-10">
-                        <div className="flex flex-col items-start md:flex-row md:items-center md:justify-between">
-                            <div>
-                                <p className="text-xs uppercase tracking-[0.35em] text-neutral-400">
-                                    {heroDetails.index >= 0 && heroDetails.index < STEPS.length ? `Step ${heroDetails.index + 1} of ${STEPS.length}` : heroDetails.index >= STEPS.length ? "Complete" : "Idle"}
-                                </p>
-                                <h2 className="mt-3 text-2xl font-semibold text-white md:text-3xl">{heroDetails.title}</h2>
-                                <p className="mt-2 max-w-xl text-sm text-neutral-300 md:text-base">{heroDetails.subtitle}</p>
-                            </div>
-                            <div className="mt-4 flex gap-2 md:mt-0">
-                                <button
-                                    type="button"
-                                    onClick={runWorkflow}
-                                    className="rounded-xl bg-gradient-to-r from-sky-600 to-indigo-500 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-sky-900/40 hover:from-sky-500 hover:to-indigo-400"
-                                >
-                                    Generate
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={resetAll}
-                                    className="rounded-xl border border-slate-800/70 bg-slate-950/60 px-4 py-2 text-sm transition hover:border-slate-500"
-                                >
-                                    Reset
-                                </button>
-                                {showPreviewCTA && (
-                                    <>
-                                        <button
-                                            type="button"
-                                            onClick={handlePreviewClick}
-                                            className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:border-emerald-400 hover:bg-emerald-500/30"
-                                        >
-                                            Preview generated site
-                                        </button>
-                                        {exportHref && (
-                                            <a
-                                                href={exportHref}
-                                                download
-                                                className="rounded-xl border border-slate-700/70 bg-slate-900/60 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white"
-                                            >
-                                                Download zip
-                                            </a>
+            {/* STATUS HERO */}
+            <section className="mx-auto w-full max-w-6xl px-6 py-6">
+                <div className="flex flex-col gap-6 lg:flex-row">
+                    <div className="flex-1">
+                        <div className="relative overflow-hidden rounded-3xl border border-slate-800/60 bg-slate-900/60 px-6 py-8 text-center shadow-lg shadow-sky-950/30 backdrop-blur lg:text-left">
+                            <div className={`absolute inset-0 bg-gradient-to-r ${heroConfig.accent} opacity-30 blur-3xl`} />
+                            <div className="relative z-10 flex flex-col items-center lg:items-start">
+                                <p className="text-xs uppercase tracking-[0.35em] text-neutral-400">{heroConfig.label}</p>
+                                <h2 className="mt-3 text-3xl font-semibold text-white md:text-4xl">{heroConfig.title}</h2>
+                                <p className="mt-3 max-w-2xl text-sm text-neutral-300 md:text-base">{heroConfig.subtitle}</p>
+
+                                {heroConfig.variant === "idea" && (
+                                    <div className="mt-6 w-full max-w-3xl space-y-5 text-left">
+                                        <div>
+                                            <label className="text-[0.65rem] uppercase tracking-[0.3em] text-neutral-400">Website idea</label>
+                                            <textarea
+                                                rows={4}
+                                                value={userPrompt}
+                                                onChange={(e) => {
+                                                    setPromptError(null);
+                                                    setUserPrompt(e.target.value);
+                                                }}
+                                                placeholder="Describe the site you want…"
+                                                className="mt-3 w-full resize-y rounded-2xl border border-slate-800/70 bg-slate-950/60 px-4 py-3 text-sm leading-relaxed text-neutral-100 outline-none placeholder:opacity-40 focus:border-slate-500"
+                                            />
+                                            {promptError && (
+                                                <p className="mt-2 text-sm text-rose-300">{promptError}</p>
+                                            )}
+                                        </div>
+                                        <div className="flex flex-col gap-2 text-sm text-neutral-200 md:flex-row md:items-center md:justify-between">
+                                            <label className="text-[0.65rem] uppercase tracking-[0.3em] text-neutral-400">Number of pages</label>
+                                            <input
+                                                type="number"
+                                                min={1}
+                                                max={8}
+                                                value={pageCount}
+                                                onChange={(e) => setPageCount(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
+                                                className="w-28 rounded-xl border border-slate-800/70 bg-slate-950/60 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+
+                                {heroConfig.variant === "plan" && (
+                                    <div className="mt-6 w-full max-w-3xl rounded-2xl border border-slate-800/70 bg-slate-950/60 p-5 text-left">
+                                        <div className="text-[0.65rem] uppercase tracking-[0.3em] text-neutral-400">Proposed pages</div>
+                                        {plan?.pages?.length ? (
+                                            <ul className="mt-3 space-y-2 text-sm text-neutral-200">
+                                                {plan.pages.map((page) => (
+                                                    <li key={page.id} className="flex flex-col gap-0.5">
+                                                        <span className="font-medium text-white">{page.title}</span>
+                                                        {page.purpose && <span className="text-xs text-neutral-400">{page.purpose}</span>}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        ) : (
+                                            <p className="mt-3 text-sm text-neutral-300/80">Generating a plan…</p>
                                         )}
-                                    </>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="mt-6 h-2 w-full overflow-hidden rounded-full bg-neutral-800">
-                            <div
-                                className="h-full rounded-full bg-gradient-to-r from-sky-500 via-blue-500 to-purple-500 transition-all duration-500"
-                                style={{ width: `${Math.max(heroProgress, showPreviewCTA ? 1 : 0) * 100}%` }}
-                            />
-                        </div>
-
-                        <div className="mt-6 grid gap-4 md:grid-cols-2">
-                            {/* Steps mirror */}
-                            <div className="rounded-2xl border border-slate-800/70 bg-slate-950/60 p-4">
-                                <div className="mb-2 text-[0.7rem] uppercase tracking-[0.3em] text-slate-400">Steps</div>
-                                {statusLines.length === 0 ? (
-                                    <p className="text-sm text-slate-300/80">No steps yet — click Generate to start.</p>
-                                ) : (
-                                    <ul className="space-y-2 text-sm text-slate-200">
-                                        {statusLines.map((line, i) => (
-                                            <li key={`${i}-${line}`} className="flex items-start gap-2">
-                                                <span className="mt-1 inline-block h-1.5 w-1.5 rounded-full bg-sky-400" />
-                                                <span className="whitespace-pre-wrap">{line}</span>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                )}
-                            </div>
-
-                            {/* Page build stream (live) */}
-                            {liveStream && (
-                                <div className="rounded-2xl border border-slate-800/70 bg-slate-950/60 p-4">
-                                    <div className="mb-2 flex items-center justify-between">
-                                        <div className="text-[0.7rem] uppercase tracking-[0.3em] text-slate-400">
-                                            Page build — {liveStream.phase === "plan" ? "Planning" : liveStream.phase === "layout" ? "Shared layout" : "Page build"}
-                                        </div>
-                                        <span
-                                            className={`inline-flex items-center gap-2 rounded-full px-2.5 py-0.5 text-[0.7rem] ${isThinking ? "border border-purple-400/50 bg-purple-500/15 text-purple-100" : "border border-slate-700/60 bg-slate-800/60 text-slate-300"
-                                                }`}
-                                        >
-                                            <span className={`h-1.5 w-1.5 rounded-full ${isThinking ? "animate-pulse bg-purple-400" : "bg-slate-400"}`} />
-                                            {isThinking ? "Thinking…" : "Responding…"}
-                                        </span>
                                     </div>
-                                    <div ref={liveContainerRef} className="max-h-[260px] overflow-auto rounded-xl border border-slate-800/60 bg-slate-950/70 p-3">
-                                        <div className="prose-invert text-sm leading-relaxed whitespace-pre-wrap break-words">
-                                            <p className="m-0">{liveStream.cleaned || "Waiting for model output…"}</p>
+                                )}
+
+                                {heroConfig.variant === "progress" && (
+                                    <div className="mt-6 w-full max-w-3xl rounded-2xl border border-slate-800/70 bg-slate-950/60 p-5 text-left">
+                                        <div className="text-[0.65rem] uppercase tracking-[0.3em] text-neutral-400">Build progress</div>
+                                        <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-neutral-800">
+                                            <div
+                                                className="h-full rounded-full bg-gradient-to-r from-sky-500 via-blue-500 to-purple-500 transition-all duration-500"
+                                                style={{ width: `${Math.max(heroProgress, generationComplete ? 1 : 0) * 100}%` }}
+                                            />
+                                        </div>
+                                        <p className="mt-3 text-sm text-neutral-300">
+                                            {generationInFlight
+                                                ? `Working through step ${Math.min(stepIndex + 1, STEPS.length)} of ${STEPS.length}…`
+                                                : generationComplete
+                                                    ? "Generation complete."
+                                                    : "Waiting for build to start."}
+                                        </p>
+                                        {statusLines.length > 0 && (
+                                            <p className="mt-2 text-xs text-neutral-400">Latest: {statusLines[statusLines.length - 1]}</p>
+                                        )}
+                                    </div>
+                                )}
+
+                                {heroConfig.variant === "preview" && (
+                                    <div className="mt-6 w-full max-w-3xl rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-5 text-left">
+                                        <div className="text-[0.65rem] uppercase tracking-[0.3em] text-emerald-200">Your build is ready</div>
+                                        <p className="mt-3 text-sm text-emerald-100">
+                                            Generated {pages.length} page{pages.length === 1 ? "" : "s"} with SEO extras packaged.
+                                        </p>
+                                        <div className="mt-4 flex flex-wrap gap-3">
+                                            <button
+                                                type="button"
+                                                onClick={handlePreviewClick}
+                                                className="rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:border-emerald-400 hover:bg-emerald-500/30"
+                                            >
+                                                Preview website
+                                            </button>
+                                            {exportHref && (
+                                                <a
+                                                    href={exportHref}
+                                                    download
+                                                    className="rounded-xl border border-slate-700/70 bg-slate-900/60 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-500 hover:text-white"
+                                                >
+                                                    Download zip
+                                                </a>
+                                            )}
                                         </div>
                                     </div>
+                                )}
+
+                                <div className="mt-6 flex flex-wrap justify-center gap-3 lg:justify-start">
+                                    <button
+                                        type="button"
+                                        onClick={handleNext}
+                                        disabled={nextDisabled}
+                                        className={`rounded-xl px-5 py-2 text-sm font-medium text-white shadow-lg shadow-sky-900/40 transition ${nextDisabled
+                                            ? "cursor-not-allowed bg-slate-700/50"
+                                            : "bg-gradient-to-r from-sky-600 to-indigo-500 hover:from-sky-500 hover:to-indigo-400"}`}
+                                    >
+                                        {nextLabel}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={resetAll}
+                                        className="rounded-xl border border-slate-800/70 bg-slate-950/60 px-4 py-2 text-sm text-neutral-200 transition hover:border-slate-500"
+                                    >
+                                        Reset
+                                    </button>
                                 </div>
-                            )}
+                            </div>
                         </div>
                     </div>
+
+                    <aside className="w-full lg:w-80">
+                        <div className="flex h-full flex-col gap-4 rounded-3xl border border-slate-800/60 bg-slate-900/70 p-4 backdrop-blur">
+                            <h3 className="text-[0.65rem] uppercase tracking-[0.35em] text-slate-400">AI activity</h3>
+                            <div className="flex flex-col gap-2">
+                                {insightItems.map((item) => {
+                                    const active = activeInsight === item.id;
+                                    return (
+                                        <button
+                                            key={item.id}
+                                            type="button"
+                                            onClick={() => setActiveInsight(item.id)}
+                                            className={`flex items-center justify-between rounded-2xl border px-3 py-2 text-sm transition ${active
+                                                ? "border-sky-400/60 bg-sky-500/15 text-sky-100"
+                                                : "border-slate-800/70 bg-slate-950/40 text-slate-200 hover:border-slate-600/70"}`}
+                                        >
+                                            <span>{item.label}</span>
+                                            {item.count > 0 && (
+                                                <span className={`inline-flex min-w-[1.5rem] justify-center rounded-full px-2 text-xs ${active ? "bg-sky-400/30 text-sky-100" : "bg-slate-800 text-slate-300"}`}>
+                                                    {item.count}
+                                                </span>
+                                            )}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            <div className="flex-1 overflow-hidden rounded-2xl border border-slate-800/70 bg-slate-950/60 p-4">
+                                <div className="max-h-72 overflow-y-auto text-left text-sm text-neutral-200">
+                                    {insightContent}
+                                </div>
+                            </div>
+                        </div>
+                    </aside>
                 </div>
             </section>
 
@@ -1271,12 +1496,6 @@ pages.forEach((page,i)=>{const btn=document.createElement('button');btn.type='bu
                             </button>
                         </div>
 
-                        <label className="text-sm opacity-80"># Pages</label>
-                        <input
-                            type="number" min={1} max={8} value={pageCount}
-                            onChange={(e) => setPageCount(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
-                            className="w-28 rounded-xl border border-slate-800/70 bg-slate-950/60 px-3 py-2 text-sm outline-none focus:border-slate-500"
-                        />
                     </div>
 
                     <div className="space-y-3">

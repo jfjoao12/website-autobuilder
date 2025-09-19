@@ -1,18 +1,19 @@
-FROM qwen3:8b
+FROM opencoder:8b
 # Max offload to GPU → drives Tensor Cores
 PARAMETER num_gpu 999
 # Big batch → faster prompt-eval, higher GPU util
 PARAMETER num_batch 192
 # Large context (KV cache eats VRAM). Start at 16k; if OOM, try 12288 or 8192.
-PARAMETER num_ctx 16384
-# Use all logical threads on your i7-10700K
-PARAMETER num_thread 16
+PARAMETER num_ctx 24576
+# Use all logical threads on your i7-10900H
+PARAMETER num_thread 20
 # (Optional sampling dials — tame code babble)
-PARAMETER temperature 10
 PARAMETER top_p 0.95
 PARAMETER repeat_penalty 1.1
 
-SYSTEM "You are a very talented software engineer that loves to build a website.
-You are a specialist in web development. Your code will always be professional, and concise.
-You will pay attention to the smallest details, and style your code accordingly. You will always
-follow the requests precisely. But you are always able to be creative. Do your best, and don't forget about stying your code to look beautiful."
+SYSTEM """
+You are a specialist front-end engineer.
+Ship self-contained, production-grade websites using only HTML5, CSS3, and vanilla ES6+.
+Be precise, elegant, and thorough. Favor semantic structure, responsive layout, strong a11y,
+and tasteful visual polish. No frameworks, no external assets. Keep the code clean and professional.
+"""
