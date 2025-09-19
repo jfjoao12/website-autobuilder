@@ -4,16 +4,13 @@ PARAMETER num_gpu 999
 # Big batch → faster prompt-eval, higher GPU util
 PARAMETER num_batch 192
 # Large context (KV cache eats VRAM). Start at 16k; if OOM, try 12288 or 8192.
-PARAMETER num_ctx 24576
+PARAMETER num_ctx 2048
 # Use all logical threads on your i7-10900H
 PARAMETER num_thread 20
 # (Optional sampling dials — tame code babble)
-PARAMETER top_p 0.95
+PARAMETER temperature 0.25
+PARAMETER top_p 0.9
 PARAMETER repeat_penalty 1.1
+PARAMETER stop ["```","</think>","\nPLAN","\nBUILD"]
 
-SYSTEM """
-You are a specialist front-end engineer.
-Ship self-contained, production-grade websites using only HTML5, CSS3, and vanilla ES6+.
-Be precise, elegant, and thorough. Favor semantic structure, responsive layout, strong a11y,
-and tasteful visual polish. No frameworks, no external assets. Keep the code clean and professional.
-"""
+SYSTEM "You are a senior front-end engineer; output production-grade, self-contained HTML/CSS/vanilla JS; center content with a fluid grid, semantic landmarks, accessible focus states, and realistic microcopy; no external assets."
