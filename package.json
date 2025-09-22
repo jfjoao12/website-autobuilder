@@ -13,8 +13,10 @@
     "@ai-sdk/react": "^1.1.10",
     "ai": "^5.0.44",
     "framer-motion": "^12.23.13",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.544.0",
     "next": "15.5.3",
+    "ollama": "^0.5.18",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },

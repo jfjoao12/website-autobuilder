@@ -1,85 +1,51 @@
-// /lib/ollama.ts
-export type CallAiOptions = {
-    prePrompt?: string;
-    json?: boolean;
-    enforceCode?: boolean;
-    stream?: boolean;
-    options?: Record<string, unknown>;
-    onChunk?: (chunk: string) => void;
-};
+"use server";
 
-export async function callAi(
-    model: string,
-    prompt: string,
-    options: CallAiOptions = {}
-): Promise<string> {
-    const { stream = false, onChunk, ...rest } = options;
-    const res = await fetch("/api/ollama", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, prompt, ...rest, stream }),
+import { Ollama } from "ollama";
+
+export type JsonOnly = Record<string, unknown>;
+
+const DEFAULT_HOST = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
+
+export async function callOllamaTwo(
+  modelName: string,
+  userPrompt: string,
+  expectJson: boolean = false,
+  systemPrompt?: string
+) {
+  const client = new Ollama({ host: DEFAULT_HOST });
+
+  if (!expectJson) {
+    const stream = await client.generate({
+      model: modelName,
+      prompt: userPrompt,
+      stream: true,
+      system: systemPrompt,
     });
-    if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || `AI error (${res.status})`);
-    }
 
-    if (!stream) {
-        return res.text();
-    }
-
-    const reader = res.body?.getReader();
-    if (!reader) {
-        throw new Error("Streaming not supported by response body");
-    }
-
-    const decoder = new TextDecoder();
     let buffer = "";
-    let aggregate = "";
-
-    while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let newlineIndex: number;
-        while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, newlineIndex).trim();
-            buffer = buffer.slice(newlineIndex + 1);
-            if (!line) continue;
-            try {
-                const parsed = JSON.parse(line);
-                const delta = typeof parsed.response === "string" ? parsed.response : "";
-                if (delta) {
-                    aggregate += delta;
-                    onChunk?.(delta);
-                }
-                if (parsed.done) {
-                    // Drain any trailing buffer after done and break out.
-                    buffer = "";
-                }
-            } catch {
-                // If parsing fails, assume plain text chunk.
-                aggregate += line;
-                onChunk?.(line);
-            }
-        }
+    for await (const chunk of stream) {
+      buffer += chunk.response ?? "";
     }
+    return { text: buffer };
+  }
 
-    if (buffer.trim()) {
-        const tail = buffer.trim();
-        try {
-            const parsed = JSON.parse(tail);
-            const delta = typeof parsed.response === "string" ? parsed.response : "";
-            if (delta) {
-                aggregate += delta;
-                onChunk?.(delta);
-            }
-        } catch {
-            aggregate += tail;
-            onChunk?.(tail);
-        }
-    }
+  const jsonSystem =
+    systemPrompt ??
+    "You are to output ONLY valid minified JSON. No prose, no code fences, no comments.";
 
-    return aggregate;
+  const res = await client.generate({
+    model: modelName,
+    system: jsonSystem,
+    prompt: userPrompt,
+    format: "json",
+    stream: false,
+  });
+
+  const raw = (res?.response ?? "").trim();
+  try {
+    const parsed: JsonOnly = JSON.parse(raw);
+    return { json: parsed };
+  } catch (e) {
+    return { error: "Failed to parse JSON from model", raw };
+  }
 }
