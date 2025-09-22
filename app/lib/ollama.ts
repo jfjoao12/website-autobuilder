@@ -45,7 +45,9 @@ export async function callOllamaTwo(
   try {
     const parsed: JsonOnly = JSON.parse(raw);
     return { json: parsed };
-  } catch (e) {
-    return { error: "Failed to parse JSON from model", raw };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "Failed to parse JSON from model";
+    return { error: message, raw };
   }
 }

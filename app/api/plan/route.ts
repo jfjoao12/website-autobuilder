@@ -25,9 +25,11 @@ Topic: ${topic}.`;
     if (error) return NextResponse.json({ error, raw }, { status: 400 });
 
     return NextResponse.json({ plan: json });
-  } catch (e: any) {
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json(
-      { error: e?.message ?? "Unknown error" },
+      { error: message },
       { status: 500 }
     );
   }
