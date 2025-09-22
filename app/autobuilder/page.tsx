@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { callAi } from "../lib/ollama";
+import type { CallAiOptions } from "../lib/ollama";
 import { slugify } from "../lib/slug";
 
 type Plan = {
@@ -897,16 +898,36 @@ export default function AutoBuilder() {
         setExportHref(null);
         setStepIndex(0); setLiveStream(null);
 
+        const runAiStep = async (
+            phase: LiveStreamPhase,
+            label: string,
+            prompt: string,
+            options: CallAiOptions = {},
+        ) => {
+            beginLiveStream(phase, label);
+            const response = await callAi(
+                model,
+                prompt,
+                {
+                    prePrompt,
+                    stream: true,
+                    ...aiOptions,
+                    ...options,
+                    onChunk: (chunk) => appendLiveStream(phase, label, chunk),
+                },
+            );
+            return response;
+        };
+
         let tokensForBuild: DesignTokens | null = null;
         let seoPack: SeoArtifacts | null = null;
 
         try {
             // 1) Shared layout
             log("1) Layout: crafting shared header and footer…");
-            beginLiveStream("layout", "Designing shared chrome");
-            const layoutRaw = await callAi(model, buildSharedLayoutPrompt(pageCount, userPrompt), {
-                prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("layout", "Designing shared chrome", c),
-                ...aiOptions,
+            const layoutLabel = "Designing shared chrome";
+            const layoutRaw = await runAiStep("layout", layoutLabel, buildSharedLayoutPrompt(pageCount, userPrompt), {
+                json: true,
             });
 
             const layoutJsonText = extractJsonObject(layoutRaw);
@@ -926,10 +947,9 @@ export default function AutoBuilder() {
 
             // 2) Site map
             log("2) Site map: drafting pages JSON…");
-            beginLiveStream("plan", "Planning site map");
-            const planRaw = await callAi(model, buildPlanPrompt(pageCount, sharedChrome.siteTitle, userPrompt), {
-                prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("plan", "Planning site map", c),
-                ...aiOptions,
+            const mapLabel = "Planning site map";
+            const planRaw = await runAiStep("plan", mapLabel, buildPlanPrompt(pageCount, sharedChrome.siteTitle, userPrompt), {
+                json: true,
             });
 
             let parsed: Plan | null = null;
@@ -946,11 +966,11 @@ export default function AutoBuilder() {
 
             log("   • Deriving design tokens…");
             const tokensLabel = "Generating design tokens";
-            beginLiveStream("plan", tokensLabel);
-            const tokensRaw = await callAi(
-                model,
+            const tokensRaw = await runAiStep(
+                "plan",
+                tokensLabel,
                 buildDesignTokensPrompt(normalisedPlan.site_title || sharedChrome.siteTitle, userPrompt),
-                { prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("plan", tokensLabel, c), ...aiOptions },
+                { json: true },
             );
 
             try {
@@ -969,91 +989,120 @@ export default function AutoBuilder() {
             const siteLabel = normalisedPlan.site_title || sharedChrome.siteTitle || "My Site";
             const siteSlug = slugify(siteLabel);
 
-            for (const p of normalisedPlan.pages) {
-                // 3a) Page plan
-                const planLabel = `Planning page "${p.title}"`;
-                log(`3) ${planLabel}…`);
-                beginLiveStream("page", planLabel);
-                const pagePlanRaw = await callAi(
-                    model,
-                    buildPagePlanPrompt(siteLabel, p, allNav, brandContext),
-                    { prePrompt, json: true, stream: true, onChunk: (c) => appendLiveStream("page", planLabel, c), ...aiOptions },
-                );
+            const stageOrder: Array<"plan" | "build" | "validate"> = ["plan", "build", "validate"];
 
-                let pagePlan: PagePlan;
-                try { pagePlan = JSON.parse(extractJsonObject(pagePlanRaw)) as PagePlan; }
-                catch { throw new Error(`Could not parse page plan for ${p.title}`); }
-                log(`→ Page plan ready for "${p.title}".`);
+            const processPage = async (p: Plan["pages"][number]) => {
+                let pagePlan: PagePlan | null = null;
+                let html = "";
+                let thoughts: string[] = [];
+                let valid = false;
+                let issues: string[] = [];
+                let accessibilityIssues: string[] = [];
 
-                // 3b) Build code
-                const buildLabel = `Generating code for "${p.title}"`;
-                log(`   • ${buildLabel}…`);
-                beginLiveStream("page", buildLabel);
-                const htmlRaw = await callAi(
-                    model,
-                    buildPagePrompt(siteLabel, p, pagePlan, sharedChrome, allNav, tokensForBuild || designTokens),
-                    { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", buildLabel, c), ...aiOptions },
-                );
-                let { cleaned: html, thoughts } = stripThinkingArtifacts(htmlRaw);
-                let { valid, issues } = validateHtml(html);
+                for (const stage of stageOrder) {
+                    if (stage === "plan") {
+                        const planLabel = `Planning page "${p.title}"`;
+                        log(`3) ${planLabel}…`);
+                        const pagePlanRaw = await runAiStep(
+                            "page",
+                            planLabel,
+                            buildPagePlanPrompt(siteLabel, p, allNav, brandContext || ""),
+                            { json: true },
+                        );
+                        try {
+                            pagePlan = JSON.parse(extractJsonObject(pagePlanRaw)) as PagePlan;
+                        } catch {
+                            throw new Error(`Could not parse page plan for ${p.title}`);
+                        }
+                        log(`→ Page plan ready for "${p.title}".`);
+                        continue;
+                    }
 
-                // 3c) Validate & auto-fix loop (configurable)
-                let attempts = 0;
-                while (!valid && attempts < maxFixes) {
-                    attempts++;
-                    const fixLabel = `Fixing "${p.title}" (pass ${attempts}/${maxFixes})`;
-                    log(`   • ${fixLabel}…`);
-                    beginLiveStream("page", fixLabel);
-                    const fixedRaw = await callAi(
-                        model,
-                        buildFixPrompt(siteLabel, p.title, issues, html),
-                        { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", fixLabel, c), ...aiOptions },
-                    );
-                    const processed = stripThinkingArtifacts(fixedRaw);
-                    html = processed.cleaned;
-                    thoughts = [...thoughts, ...processed.thoughts];
-                    const check = validateHtml(html);
-                    valid = check.valid;
-                    issues = check.issues;
-                }
+                    if (stage === "build") {
+                        if (!pagePlan) {
+                            throw new Error(`Page plan missing for ${p.title}`);
+                        }
+                        const buildLabel = `Generating code for "${p.title}"`;
+                        log(`   • ${buildLabel}…`);
+                        const htmlRaw = await runAiStep(
+                            "page",
+                            buildLabel,
+                            buildPagePrompt(siteLabel, p, pagePlan, sharedChrome, allNav, tokensForBuild || designTokens),
+                            { json: false, enforceCode: true },
+                        );
+                        const processed = stripThinkingArtifacts(htmlRaw);
+                        html = processed.cleaned;
+                        thoughts = [...thoughts, ...processed.thoughts];
+                        const structural = validateHtml(html);
+                        valid = structural.valid;
+                        issues = structural.issues;
+                        accessibilityIssues = [];
+                        continue;
+                    }
 
-                let accessibilityIssues = runAccessibilityAudit(html);
-                if (accessibilityIssues.length > 0) {
-                    log(`   • Accessibility audit found issues: ${accessibilityIssues.join("; ")}`);
-                    const a11yFixLabel = `Patching accessibility for "${p.title}"`;
-                    beginLiveStream("page", a11yFixLabel);
-                    const a11yFixRaw = await callAi(
-                        model,
-                        buildA11yFixPrompt(siteLabel, p.title, accessibilityIssues, html),
-                        { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", a11yFixLabel, c), ...aiOptions },
-                    );
-                    const processedA11y = stripThinkingArtifacts(a11yFixRaw);
-                    html = processedA11y.cleaned;
-                    thoughts = [...thoughts, ...processedA11y.thoughts];
-                    const structuralAfterPatch = validateHtml(html);
-                    valid = structuralAfterPatch.valid;
-                    issues = structuralAfterPatch.issues;
+                    // stage === "validate"
+                    let attempts = 0;
+                    while (!valid && attempts < maxFixes) {
+                        attempts++;
+                        const fixLabel = `Fixing "${p.title}" (pass ${attempts}/${maxFixes})`;
+                        log(`   • ${fixLabel}…`);
+                        const fixedRaw = await runAiStep(
+                            "page",
+                            fixLabel,
+                            buildFixPrompt(siteLabel, p.title, issues, html),
+                            { json: false, enforceCode: true },
+                        );
+                        const processedFix = stripThinkingArtifacts(fixedRaw);
+                        html = processedFix.cleaned;
+                        thoughts = [...thoughts, ...processedFix.thoughts];
+                        const check = validateHtml(html);
+                        valid = check.valid;
+                        issues = check.issues;
+                    }
+
                     accessibilityIssues = runAccessibilityAudit(html);
-                    if (accessibilityIssues.length === 0) {
-                        log("   • Accessibility patch ✅ Issues resolved.");
+                    if (accessibilityIssues.length > 0) {
+                        log(`   • Accessibility audit found issues: ${accessibilityIssues.join("; ")}`);
+                        const a11yFixLabel = `Patching accessibility for "${p.title}"`;
+                        const a11yFixRaw = await runAiStep(
+                            "page",
+                            a11yFixLabel,
+                            buildA11yFixPrompt(siteLabel, p.title, accessibilityIssues, html),
+                            { json: false, enforceCode: true },
+                        );
+                        const processedA11y = stripThinkingArtifacts(a11yFixRaw);
+                        html = processedA11y.cleaned;
+                        thoughts = [...thoughts, ...processedA11y.thoughts];
+                        const structuralAfterPatch = validateHtml(html);
+                        valid = structuralAfterPatch.valid;
+                        issues = structuralAfterPatch.issues;
+                        accessibilityIssues = runAccessibilityAudit(html);
+                        if (accessibilityIssues.length === 0) {
+                            log("   • Accessibility patch ✅ Issues resolved.");
+                        }
+                    }
+
+                    if (accessibilityIssues.length > 0) {
+                        const tagged = accessibilityIssues.map((issue) => `Accessibility: ${issue}`);
+                        issues = [...issues, ...tagged];
+                        valid = false;
+                        log(`   • Accessibility audit ⚠️ Remaining issues: ${accessibilityIssues.join("; ")}`);
+                    }
+
+                    if (valid && issues.length === 0) {
+                        log(`   • "${p.title}" ✅ Passed validation.`);
+                    } else {
+                        const detail = issues.length ? issues.join("; ") : "Unknown validation issues";
+                        log(`   • "${p.title}" ⚠️ Still has issues: ${detail}`);
                     }
                 }
 
-                if (accessibilityIssues.length > 0) {
-                    const tagged = accessibilityIssues.map((issue) => `Accessibility: ${issue}`);
-                    issues = [...issues, ...tagged];
-                    valid = false;
-                    log(`   • Accessibility audit ⚠️ Remaining issues: ${accessibilityIssues.join("; ")}`);
-                }
+                const built: BuiltPage = { id: p.id, title: p.title, html, valid, issues, thinking: thoughts };
+                return built;
+            };
 
-                if (valid && issues.length === 0) {
-                    log(`   • "${p.title}" ✅ Passed validation.`);
-                } else {
-                    const detail = issues.length ? issues.join("; ") : "Unknown validation issues";
-                    log(`   • "${p.title}" ⚠️ Still has issues: ${detail}`);
-                }
-
-                const built = { id: p.id, title: p.title, html, valid, issues, thinking: thoughts };
+            for (const p of normalisedPlan.pages) {
+                const built = await processPage(p);
                 builtPages.push(built);
                 setPages((prev) => [...prev, built]);
             }
@@ -1070,11 +1119,11 @@ export default function AutoBuilder() {
                     const target = builtPages.find((page) => page.id === pageId);
                     if (!target || brokenList.length === 0) continue;
                     const fixLabel = `Fixing cross-links for "${target.title}"`;
-                    beginLiveStream("page", fixLabel);
-                    const linkFixRaw = await callAi(
-                        model,
+                    const linkFixRaw = await runAiStep(
+                        "page",
+                        fixLabel,
                         buildLinkFixPrompt(siteLabel, target.title, brokenList, target.html, allNav),
-                        { prePrompt, json: false, stream: true, onChunk: (c) => appendLiveStream("page", fixLabel, c), ...aiOptions },
+                        { json: false, enforceCode: true },
                     );
                     const processedFix = stripThinkingArtifacts(linkFixRaw);
                     target.html = processedFix.cleaned;

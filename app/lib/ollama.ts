@@ -2,6 +2,7 @@
 export type CallAiOptions = {
     prePrompt?: string;
     json?: boolean;
+    enforceCode?: boolean;
     stream?: boolean;
     onChunk?: (chunk: string) => void;
 };

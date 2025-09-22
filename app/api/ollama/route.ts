@@ -7,7 +7,7 @@ const OLLAMA_HOST = process.env.OLLAMA_HOST?.replace(/\/+$/, "") || "http://127.
 
 export async function POST(req: NextRequest) {
     try {
-        const { model, prompt, prePrompt, json, stream } = await req.json();
+        const { model, prompt, prePrompt, json, stream, enforceCode } = await req.json();
 
         if (!model || !prompt) {
             return new NextResponse("Missing model or prompt", { status: 400 });
@@ -16,8 +16,9 @@ export async function POST(req: NextRequest) {
         // Build a succinct prompt (optionally JSON-first)
         const finalPrompt =
             (prePrompt ? prePrompt + "\n\n" : "") +
-            (json
-                ? "Return ONLY valid JSON as the final output without extra commentary.\n\n"
+            (json ? "Return ONLY valid JSON as the final output without extra commentary.\n\n" : "") +
+            (enforceCode
+                ? "Output ONLY executable HTML (with inline CSS/JS if needed) suitable for saving directly as a .html file. No markdown, explanations, or commentary.\n\n"
                 : "") +
             prompt;
 
