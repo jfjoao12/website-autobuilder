@@ -4,6 +4,7 @@ export type CallAiOptions = {
     json?: boolean;
     enforceCode?: boolean;
     stream?: boolean;
+    options?: Record<string, unknown>;
     onChunk?: (chunk: string) => void;
 };
 

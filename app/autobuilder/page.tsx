@@ -255,6 +255,7 @@ Issues:
 ${issues.map(i => `- ${i}`).join("\n")}
 
 Return ONLY a fully corrected, self-contained HTML document. Keep styles minimal and dark-friendly. No external assets.
+Do not output JSON, Markdown fences, or commentary — deliver the full <!doctype html> payload only.
 Here is your previous attempt (for reference):
 ---
 ${html}
@@ -268,6 +269,7 @@ Accessibility issues to address:
 ${issues.map((issue) => `- ${issue}`).join("\n")}
 
 Return ONLY the updated HTML document with minimal edits that resolve the issues. Keep the existing structure, styles, and copy; modify only the necessary attributes/elements. Do not introduce new frameworks or external assets.
+Never return JSON, Markdown, or bullet summaries — respond with the exact HTML document.
 Here is the current HTML:
 ---
 ${html}
@@ -290,6 +292,7 @@ Invalid links to correct:
 ${brokenLinks.map((link) => `- href="${link.href}"${link.text ? ` (text: ${link.text})` : ""}`).join("\n")}
 
 Return ONLY the revised HTML document. Adjust only the href values necessary so each link resolves to one of the valid pages above. Do not change other content or structure.
+Respond with raw HTML only; do not include JSON or explanations.
 Here is the current HTML:
 ---
 ${html}
@@ -505,6 +508,7 @@ Constraints:
 - Inline <style> with a minimal, modern, dark-friendly palette.
 - Optional <script> allowed for small interactions only (no external imports).
 - The page must be fully functional if saved as a standalone .html file.
+- Output raw HTML only — no JSON, Markdown, or commentary.
 ${layoutGuidance}- Use the page "purpose" to drive content. Avoid lorem ipsum.
 ${planning}
 ${tokensSummary}
@@ -513,7 +517,7 @@ ${navList}
 
 ${sharedChromeSnippet}
 
-Return ONLY the final HTML document. Do not wrap in Markdown.
+Return ONLY the final HTML document. Do not wrap in Markdown or JSON.
 
 Page:
 {
@@ -989,58 +993,44 @@ export default function AutoBuilder() {
             const siteLabel = normalisedPlan.site_title || sharedChrome.siteTitle || "My Site";
             const siteSlug = slugify(siteLabel);
 
-            const stageOrder: Array<"plan" | "build" | "validate"> = ["plan", "build", "validate"];
-
             const processPage = async (p: Plan["pages"][number]) => {
-                let pagePlan: PagePlan | null = null;
-                let html = "";
-                let thoughts: string[] = [];
-                let valid = false;
-                let issues: string[] = [];
-                let accessibilityIssues: string[] = [];
+                const planLabel = `Planning page "${p.title}"`;
+                log(`3) ${planLabel}…`);
+                const pagePlanRaw = await runAiStep(
+                    "page",
+                    planLabel,
+                    buildPagePlanPrompt(siteLabel, p, allNav, brandContext || ""),
+                    { json: true },
+                );
+                let pagePlan: PagePlan;
+                try {
+                    pagePlan = JSON.parse(extractJsonObject(pagePlanRaw)) as PagePlan;
+                } catch {
+                    throw new Error(`Could not parse page plan for ${p.title}`);
+                }
+                log(`→ Page plan ready for "${p.title}".`);
 
-                for (const stage of stageOrder) {
-                    if (stage === "plan") {
-                        const planLabel = `Planning page "${p.title}"`;
-                        log(`3) ${planLabel}…`);
-                        const pagePlanRaw = await runAiStep(
-                            "page",
-                            planLabel,
-                            buildPagePlanPrompt(siteLabel, p, allNav, brandContext || ""),
-                            { json: true },
-                        );
-                        try {
-                            pagePlan = JSON.parse(extractJsonObject(pagePlanRaw)) as PagePlan;
-                        } catch {
-                            throw new Error(`Could not parse page plan for ${p.title}`);
-                        }
-                        log(`→ Page plan ready for "${p.title}".`);
-                        continue;
-                    }
+                type BuildCycleResult = {
+                    html: string;
+                    thoughts: string[];
+                    valid: boolean;
+                    issues: string[];
+                    accessibilityIssues: string[];
+                };
 
-                    if (stage === "build") {
-                        if (!pagePlan) {
-                            throw new Error(`Page plan missing for ${p.title}`);
-                        }
-                        const buildLabel = `Generating code for "${p.title}"`;
-                        log(`   • ${buildLabel}…`);
-                        const htmlRaw = await runAiStep(
-                            "page",
-                            buildLabel,
-                            buildPagePrompt(siteLabel, p, pagePlan, sharedChrome, allNav, tokensForBuild || designTokens),
-                            { json: false, enforceCode: true },
-                        );
-                        const processed = stripThinkingArtifacts(htmlRaw);
-                        html = processed.cleaned;
-                        thoughts = [...thoughts, ...processed.thoughts];
-                        const structural = validateHtml(html);
-                        valid = structural.valid;
-                        issues = structural.issues;
-                        accessibilityIssues = [];
-                        continue;
-                    }
+                const runBuildCycle = async (label: string, prompt: string): Promise<BuildCycleResult> => {
+                    log(`   • ${label}…`);
+                    const raw = await runAiStep(
+                        "page",
+                        label,
+                        prompt,
+                        { json: false, enforceCode: true },
+                    );
+                    const processed = stripThinkingArtifacts(raw);
+                    let html = processed.cleaned;
+                    let thoughts = [...processed.thoughts];
+                    let { valid, issues } = validateHtml(html);
 
-                    // stage === "validate"
                     let attempts = 0;
                     while (!valid && attempts < maxFixes) {
                         attempts++;
@@ -1060,7 +1050,7 @@ export default function AutoBuilder() {
                         issues = check.issues;
                     }
 
-                    accessibilityIssues = runAccessibilityAudit(html);
+                    let accessibilityIssues = runAccessibilityAudit(html);
                     if (accessibilityIssues.length > 0) {
                         log(`   • Accessibility audit found issues: ${accessibilityIssues.join("; ")}`);
                         const a11yFixLabel = `Patching accessibility for "${p.title}"`;
@@ -1089,15 +1079,51 @@ export default function AutoBuilder() {
                         log(`   • Accessibility audit ⚠️ Remaining issues: ${accessibilityIssues.join("; ")}`);
                     }
 
-                    if (valid && issues.length === 0) {
-                        log(`   • "${p.title}" ✅ Passed validation.`);
-                    } else {
-                        const detail = issues.length ? issues.join("; ") : "Unknown validation issues";
-                        log(`   • "${p.title}" ⚠️ Still has issues: ${detail}`);
-                    }
+                    return { html, thoughts, valid, issues, accessibilityIssues };
+                };
+
+                const basePrompt = buildPagePrompt(siteLabel, p, pagePlan, sharedChrome, allNav, tokensForBuild || designTokens);
+                let result = await runBuildCycle(`Generating code for "${p.title}"`, basePrompt);
+                let combinedThoughts = [...result.thoughts];
+
+                if (!result.valid || result.accessibilityIssues.length > 0) {
+                    const unresolved = [
+                        ...result.issues,
+                        ...result.accessibilityIssues.map((issue) => `Accessibility: ${issue}`),
+                    ];
+                    const reminder = unresolved.length
+                        ? `Resolve these outstanding problems:
+${unresolved.map((item) => `- ${item}`).join("\n")}`
+                        : "Ensure the regenerated document passes all structural and accessibility checks.";
+                    const retryPrompt = `${buildPagePrompt(siteLabel, p, pagePlan, sharedChrome, allNav, tokensForBuild || designTokens)}\n\nThe previous attempt failed validation. ${reminder}\n`;
+                    const retry = await runBuildCycle(`Regenerating code for "${p.title}"`, retryPrompt);
+                    combinedThoughts = [...combinedThoughts, ...retry.thoughts];
+                    result = {
+                        html: retry.html,
+                        thoughts: combinedThoughts,
+                        valid: retry.valid,
+                        issues: retry.issues,
+                        accessibilityIssues: retry.accessibilityIssues,
+                    };
+                } else {
+                    result = { ...result, thoughts: combinedThoughts };
                 }
 
-                const built: BuiltPage = { id: p.id, title: p.title, html, valid, issues, thinking: thoughts };
+                if (result.valid && result.issues.length === 0) {
+                    log(`   • "${p.title}" ✅ Passed validation.`);
+                } else {
+                    const detail = result.issues.length ? result.issues.join("; ") : "Unknown validation issues";
+                    log(`   • "${p.title}" ⚠️ Still has issues: ${detail}`);
+                }
+
+                const built: BuiltPage = {
+                    id: p.id,
+                    title: p.title,
+                    html: result.html,
+                    valid: result.valid,
+                    issues: result.issues,
+                    thinking: result.thoughts,
+                };
                 return built;
             };
 

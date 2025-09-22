@@ -7,7 +7,7 @@ const OLLAMA_HOST = process.env.OLLAMA_HOST?.replace(/\/+$/, "") || "http://127.
 
 export async function POST(req: NextRequest) {
     try {
-        const { model, prompt, prePrompt, json, stream, enforceCode } = await req.json();
+        const { model, prompt, prePrompt, json, stream, enforceCode, options } = await req.json();
 
         if (!model || !prompt) {
             return new NextResponse("Missing model or prompt", { status: 400 });
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
         const r = await fetch(`${OLLAMA_HOST}/api/generate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model, prompt: finalPrompt, stream: Boolean(stream) }),
+            body: JSON.stringify({ model, prompt: finalPrompt, stream: Boolean(stream), options }),
         });
 
         if (!r.ok) {
