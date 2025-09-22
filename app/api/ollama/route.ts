@@ -1,0 +1,83 @@
+import { NextRequest, NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+
+const OLLAMA_HOST = process.env.OLLAMA_HOST?.replace(/\/+$/, "") || "http://127.0.0.1:11434";
+
+export async function POST(req: NextRequest) {
+    try {
+        const { model, prompt, prePrompt, json, stream, enforceCode, options } = await req.json();
+
+        if (!model || !prompt) {
+            return new NextResponse("Missing model or prompt", { status: 400 });
+        }
+
+        const finalPrompt =
+            (prePrompt ? `${prePrompt}\n\n` : "") +
+            (json ? "Return ONLY valid JSON as the final output without extra commentary.\n\n" : "") +
+            (enforceCode
+                ? "Output ONLY executable HTML (with inline CSS/JS if needed) suitable for saving directly as a .html file. No markdown, explanations, or commentary.\n\n"
+                : "") +
+            prompt;
+
+        const response = await fetch(`${OLLAMA_HOST}/api/generate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model, prompt: finalPrompt, stream: Boolean(stream), options }),
+        });
+
+        if (!response.ok) {
+            const text = await response.text().catch(() => "");
+            return new NextResponse(text || "Ollama error", { status: response.status });
+        }
+
+        if (stream) {
+            const decoder = new TextDecoder();
+            const encoder = new TextEncoder();
+            const upstream = response.body;
+            if (!upstream) {
+                return new NextResponse("", { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+            }
+
+            const downstream = new ReadableStream<Uint8Array>({
+                async start(controller) {
+                    const reader = upstream.getReader();
+                    let buffer = "";
+                    try {
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (done) break;
+                            buffer += decoder.decode(value, { stream: true });
+                            let newlineIndex: number;
+                            while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+                                const line = buffer.slice(0, newlineIndex).trim();
+                                buffer = buffer.slice(newlineIndex + 1);
+                                if (line) controller.enqueue(encoder.encode(`${line}\n`));
+                            }
+                        }
+                        const tail = buffer.trim();
+                        if (tail) controller.enqueue(encoder.encode(`${tail}\n`));
+                    } finally {
+                        controller.close();
+                    }
+                },
+            });
+
+            return new NextResponse(downstream, {
+                headers: {
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "Cache-Control": "no-cache",
+                },
+            });
+        }
+
+        const data = await response.json().catch(() => null);
+        const payload = typeof data?.response === "string" ? data.response : "";
+        return new NextResponse(payload, {
+            headers: { "Content-Type": "text/plain; charset=utf-8" },
+        });
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Server error";
+        return new NextResponse(message, { status: 500 });
+    }
+}
