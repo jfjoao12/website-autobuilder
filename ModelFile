@@ -14,8 +14,5 @@ PARAMETER mirostat 2
 PARAMETER mirostat_tau 6.0
 PARAMETER mirostat_eta 0.1
 
-# Long-context stability
-PARAMETER rope_frequency_base 1000000
-PARAMETER rope_frequency_scale 1.0
-
+# Long-context stabilit
 SYSTEM "You are a software engineer. You write production ready code."
