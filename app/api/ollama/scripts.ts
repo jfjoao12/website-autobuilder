@@ -1,27 +1,83 @@
-import { callOllama, DEFAULT_HOST } from "./call";
+import {
+  callOllama,
+  DEFAULT_HOST,
+  streamOllamaText,
+} from "./call";
 
-export async function generatePlan(input: string, model: string) {
-  return callOllama(
-    model,
-    `Create a plan for a webpage for me. I want some nice flow on the page and I wanna impress everyone. The page is about: ${input}`,
-    false
-  );
-}
+const PAGE_MARKER = "### Page";
 
-export async function generateCode(plan: string, model: string) {
-  return callOllama(
-    model,
-    `Create a webpage based on the following plan. The code should be in a single HTML file with embedded CSS and JavaScript. 
-    The page should be visually appealing and user-friendly. You are allowed to be creative and implement innovative ideas. Here is the plan: ${plan}`,
-    false
-  );
-}
-
-type OllamaTagResponse = {
-  models?: Array<{
-    name?: string;
-  }>;
+type CodePromptOptions = {
+  allPlans?: string[];
+  pageIndex?: number;
 };
+
+type LayoutFragments = {
+  header: string;
+  footer: string;
+};
+
+export async function generatePlan(
+  input: string,
+  model: string,
+  pageCount: number = 1
+): Promise<string[]> {
+  const raw = await callOllama(
+    model,
+    `Create a comprehensive multi-page website plan based on the following description. Generate ${pageCount} distinct page plans in a single response. Each plan MUST begin with the exact heading "### Page <number>: <Title>" followed by detailed bullet points that cover layout, hero concept, sections, interactions, tone, and visual direction. Keep language concise and scannable.\n\nDescription: ${input}`,
+    false
+  );
+
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return [];
+  }
+
+  const segments = raw
+    .split(new RegExp(`(?=${PAGE_MARKER})`, "g"))
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.startsWith(PAGE_MARKER));
+
+  const normalizedCount = Number.isFinite(pageCount)
+    ? Math.max(1, Math.floor(pageCount))
+    : 1;
+
+  return segments.slice(0, normalizedCount);
+}
+
+export async function generateCode(
+  plan: string,
+  model: string,
+  options: CodePromptOptions = {}
+) {
+  return callOllama(model, buildCodePrompt(plan, options), false);
+}
+
+export async function streamCode(
+  plan: string,
+  model: string,
+  options: CodePromptOptions = {}
+) {
+  return streamOllamaText(model, buildCodePrompt(plan, options));
+}
+
+export async function generateLayoutFragments(
+  plans: string[],
+  model: string
+): Promise<LayoutFragments> {
+  const response = await callOllama(
+    model,
+    buildLayoutPrompt(plans),
+    true
+  );
+
+  const header = typeof response?.header === "string" ? response.header.trim() : "";
+  const footer = typeof response?.footer === "string" ? response.footer.trim() : "";
+
+  if (!header || !footer) {
+    throw new Error("Layout generation failed");
+  }
+
+  return { header, footer };
+}
 
 export async function listModels(host: string = DEFAULT_HOST) {
   const base = host.endsWith("/") ? host.slice(0, -1) : host;
@@ -34,7 +90,10 @@ export async function listModels(host: string = DEFAULT_HOST) {
     throw new Error(`Failed to fetch Ollama models (${response.status})`);
   }
 
-  const payload = (await response.json()) as OllamaTagResponse;
+  const payload = (await response.json()) as {
+    models?: Array<{ name?: string }>;
+  };
+
   const names = Array.isArray(payload.models)
     ? payload.models
         .map((modelEntry) => modelEntry?.name?.trim())
@@ -44,8 +103,41 @@ export async function listModels(host: string = DEFAULT_HOST) {
   return names;
 }
 
-// export async function buildWebpage(input: string, model: string) {
-//   const plan = await generatePlan(input, model);
-//   const code = await generateCode(plan, model);
-//   return { plan, code };
-// }
+function buildCodePrompt(plan: string, options: CodePromptOptions) {
+  const { allPlans = [], pageIndex } = options;
+  const pageNumber = typeof pageIndex === "number" ? pageIndex + 1 : "?";
+
+  const summaries = allPlans
+    .map((entry, idx) => {
+      const firstLine = entry.split(/\r?\n/).find((line) => line.trim());
+      return `Page ${idx + 1}: ${firstLine ?? entry.slice(0, 60)}`;
+    })
+    .join("\n");
+
+  return [
+    `You are designing Page ${pageNumber} of a cohesive multi-page website.`,
+    "Follow the provided plan exactly, keep the styling consistent with the rest of the site, and favour modern, clean aesthetics.",
+    "Return a single self-contained HTML document with embedded CSS and JavaScript.",
+    "Do NOT include a global <header> or <footer>; those will be added later.",
+    "Re-use typography, spacing, and color cues that match the other pages.",
+    summaries ? `Other page summaries for context:\n${summaries}` : "",
+    "Plan for the current page:",
+    plan,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildLayoutPrompt(plans: string[]) {
+  const planBlock = plans
+    .map((plan, index) => `Page ${index + 1}:\n${plan}`)
+    .join("\n\n");
+
+  return [
+    "You are an expert front-end designer creating a unified site experience.",
+    "Design a shared site header and footer that align with the style cues of the following page plans.",
+    "Return JSON with two string fields: header and footer. The header/footer should be HTML fragments with inline CSS and no <html>, <head>, or <body> wrappers.",
+    "Focus on consistency in typography, spacing, and call-to-action styling.",
+    "Plans:\n" + planBlock,
+  ].join("\n\n");
+}

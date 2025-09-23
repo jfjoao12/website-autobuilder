@@ -7,19 +7,23 @@ export const DEFAULT_HOST = "http://127.0.0.1:11434";
 export async function callOllama(
   modelName: string,
   userPrompt: string,
-  expectJson: boolean = false,
+  expectJson = false,
   host: string = DEFAULT_HOST
 ) {
   const client = new Ollama({ host });
 
   if (!expectJson) {
-    const result = await client.generate({
+    const stream = await client.generate({
       model: modelName,
       prompt: userPrompt,
-      stream: false,
+      stream: true,
     });
 
-    return (result?.response ?? "").trim();
+    let aggregated = "";
+    for await (const chunk of stream) {
+      aggregated += chunk?.response ?? "";
+    }
+    return aggregated.trim();
   }
 
   const jsonSystemPrompt =
@@ -35,18 +39,21 @@ export async function callOllama(
 
   const raw = (result?.response ?? "").trim();
   try {
-    const parsed: JsonOnly = JSON.parse(raw);
-    return parsed;
-  } catch (err) {
-    console.error("❌ Could not parse JSON. Raw output below:");
-    console.error(raw);
-    throw err;
+    return JSON.parse(raw) as JsonOnly;
+  } catch {
+    throw new Error("Failed to parse JSON from Ollama response");
   }
 }
 
-// Example usage:
-// callOllama(
-//   "qwen3:0.6b",
-//   `Create a plan for a website page that will have the name of the page, functionalities (with detailed features), colors, etc.`,
-//   false
-// ).catch(console.error);
+export async function streamOllamaText(
+  modelName: string,
+  userPrompt: string,
+  host: string = DEFAULT_HOST
+) {
+  const client = new Ollama({ host });
+  return client.generate({
+    model: modelName,
+    prompt: userPrompt,
+    stream: true,
+  });
+}
