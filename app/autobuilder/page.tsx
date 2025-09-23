@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
 import { Check, Download, Eye } from "lucide-react";
 import JSZip from "jszip";
@@ -11,6 +12,14 @@ const DEFAULT_MODELS = [
   "qwen3:3b-instruct",
   "qwen3:7b-instruct",
 ];
+
+const STEP_LABELS: Record<Step, string> = {
+  1: "Plan",
+  2: "Build",
+  3: "Review",
+};
+
+const TOTAL_STEPS = 3;
 
 type Step = 1 | 2 | 3;
 
@@ -26,7 +35,7 @@ type LayoutFragments = {
   footer: string;
 };
 
-type OllamaAction = "plan" | "models" | "code" | "layout";
+type OllamaAction = "plan" | "models" | "code" | "layout" | "plan-page";
 
 async function requestOllama<T extends Record<string, unknown>>(
   model: string,
@@ -132,6 +141,18 @@ function appendLayout(html: string, header: string, footer: string) {
   return `<html>\n<body>\n${bodyWrapped}\n</body>\n</html>`;
 }
 
+function sanitizeGeneratedCode(code: string) {
+  let output = code.trim();
+
+  if (output.startsWith("```") && output.endsWith("```")) {
+    output = output.replace(/^```[a-zA-Z0-9-]*\s*/, "").replace(/```$/, "");
+  }
+
+  output = output.replace(/```html\s*/gi, "");
+
+  return output.trim();
+}
+
 function PlanMarkup({ plan }: { plan: string }) {
   const lines = plan.split(/\r?\n/);
   const elements: React.ReactNode[] = [];
@@ -229,12 +250,14 @@ export default function Page() {
   const [pagePlans, setPagePlans] = useState<string[]>([]);
   const [planApprovals, setPlanApprovals] = useState<boolean[]>([]);
   const [expandedPlans, setExpandedPlans] = useState<boolean[]>([]);
+  const [planLoadingIndex, setPlanLoadingIndex] = useState<number | null>(null);
 
   const [files, setFiles] = useState<GeneratedFile[]>([]);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [layoutFragments, setLayoutFragments] = useState<LayoutFragments | null>(
     null
   );
+  const [sandboxPath, setSandboxPath] = useState<string | null>(null);
 
   const [streamingIndex, setStreamingIndex] = useState<number | null>(null);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number | null>(
@@ -243,6 +266,9 @@ export default function Page() {
   const [streamedCode, setStreamedCode] = useState("");
   const [streamError, setStreamError] = useState<string | null>(null);
   const [showStreamPanel, setShowStreamPanel] = useState(false);
+  const [streamPanelDetached, setStreamPanelDetached] = useState(false);
+  const [streamPanelPosition, setStreamPanelPosition] = useState({ x: 80, y: 80 });
+  const [streamPanelSize, setStreamPanelSize] = useState({ width: 480, height: 340 });
 
   const [stepTwoReady, setStepTwoReady] = useState(false);
 
@@ -290,6 +316,20 @@ export default function Page() {
       streamControllerRef.current?.abort();
     };
   }, [model]);
+
+  useEffect(() => {
+    if (files.length === 0) {
+      setSandboxPath(null);
+      return;
+    }
+
+    setSandboxPath((current) => {
+      if (current && files.some((file) => file.path === current)) {
+        return current;
+      }
+      return files[0]?.path ?? null;
+    });
+  }, [files]);
 
   const variants: Variants = {
     enter: (dir: number) => ({
@@ -351,6 +391,7 @@ export default function Page() {
     setStreamedCode("");
     setStreamError(null);
     setShowStreamPanel(false);
+    setStreamPanelDetached(false);
     setFiles([]);
     setValidation(null);
     setLayoutFragments(null);
@@ -362,6 +403,7 @@ export default function Page() {
     setStep(1);
     setLoading(true);
     setError(null);
+    setValidation(null);
     setPagePlans([]);
 
     try {
@@ -378,6 +420,7 @@ export default function Page() {
       setPagePlans(trimmedPlans);
       setPlanApprovals(new Array(trimmedPlans.length).fill(false));
       setExpandedPlans(new Array(trimmedPlans.length).fill(false));
+      setPlanLoadingIndex(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to create plan";
       setError(message);
@@ -401,20 +444,19 @@ export default function Page() {
       const generated: GeneratedFile[] = [];
 
       for (let i = 0; i < pagePlans.length; i++) {
-        const result = await requestOllama<{ code?: string }>(model, "code", {
-          plan: pagePlans[i],
-          allPlans: pagePlans,
-          pageIndex: i,
+        const raw = await streamCodeForPage(i, pagePlans[i], {
+          applyLayout: false,
+          updateFiles: false,
+          resetValidation: i === 0,
         });
 
-        const code = typeof result.code === "string" ? result.code.trim() : "";
-        if (!code) {
+        if (!raw) {
           throw new Error(`Code generation failed for page ${i + 1}`);
         }
 
         generated.push({
           path: `page-${i + 1}.html`,
-          content: code,
+          content: raw,
         });
       }
 
@@ -440,6 +482,7 @@ export default function Page() {
       setLayoutFragments({ header: headerFragment, footer: footerFragment });
       setValidation(mockValidate(withLayout));
       setStepTwoReady(true);
+      setStreamedCode(withLayout[withLayout.length - 1]?.content ?? "");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to generate code";
       setError(message);
@@ -448,9 +491,38 @@ export default function Page() {
     }
   }
 
-  async function streamCodePreview(index: number) {
+  async function handleStreamPreview(index: number) {
     const plan = pagePlans[index];
     if (!plan) return;
+
+    try {
+      await streamCodeForPage(index, plan, {
+        applyLayout: Boolean(layoutFragments),
+        updateFiles: true,
+        resetValidation: true,
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return;
+      }
+      const message = err instanceof Error ? err.message : "Failed to stream code";
+      setError(message);
+    }
+  }
+
+  async function streamCodeForPage(
+    index: number,
+    plan: string,
+    options: {
+      applyLayout?: boolean;
+      updateFiles?: boolean;
+      resetValidation?: boolean;
+    } = {}
+  ) {
+    const { applyLayout = true, updateFiles = true, resetValidation = false } =
+      options;
+
+    if (!plan) return "";
 
     streamControllerRef.current?.abort();
     const controller = new AbortController();
@@ -460,7 +532,9 @@ export default function Page() {
     setStreamingIndex(index);
     setActiveStreamIndex(index);
     setStreamedCode("");
-    setValidation(null);
+    if (resetValidation) {
+      setValidation(null);
+    }
 
     let aggregated = "";
     let completed = false;
@@ -504,12 +578,12 @@ export default function Page() {
         aggregated += finalFlush;
       }
 
-      aggregated = aggregated.trim();
+      aggregated = sanitizeGeneratedCode(aggregated);
       if (aggregated.length === 0) {
         throw new Error("No code returned by the model");
       }
 
-      if (layoutFragments) {
+      if (applyLayout && layoutFragments) {
         aggregated = appendLayout(
           aggregated,
           layoutFragments.header,
@@ -518,15 +592,20 @@ export default function Page() {
       }
 
       completed = true;
+
+      if (updateFiles) {
+        setFiles((prev) => {
+          const next = [...prev];
+          next[index] = {
+            path: `page-${index + 1}.html`,
+            content: aggregated,
+          };
+          return next;
+        });
+      }
+
       setStreamedCode(aggregated);
-      setFiles((prev) => {
-        const next = [...prev];
-        next[index] = {
-          path: `page-${index + 1}.html`,
-          content: aggregated,
-        };
-        return next;
-      });
+      return aggregated;
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         // streaming cancelled by user
@@ -537,6 +616,7 @@ export default function Page() {
           setActiveStreamIndex(null);
         }
       }
+      throw err;
     } finally {
       if (streamControllerRef.current === controller) {
         streamControllerRef.current = null;
@@ -546,6 +626,52 @@ export default function Page() {
       if (!completed && aggregated.trim().length > 0) {
         setStreamedCode(aggregated.trim());
       }
+    }
+  }
+
+  function updatePlanText(index: number, value: string) {
+    setPagePlans((prev) => {
+      const next = [...prev];
+      next[index] = value;
+      return next;
+    });
+
+    setPlanApprovals((prev) => {
+      const next = [...prev];
+      next[index] = false;
+      return next;
+    });
+  }
+
+  async function regeneratePlan(index: number) {
+    if (!pagePlans[index]) return;
+    setPlanLoadingIndex(index);
+    try {
+      const payload = await requestOllama<{ plan?: string }>(model, "plan-page", {
+        plans: pagePlans,
+        pageIndex: index,
+      });
+
+      if (!payload.plan || typeof payload.plan !== "string") {
+        throw new Error("Plan regeneration failed");
+      }
+
+      setPagePlans((prev) => {
+        const next = [...prev];
+        next[index] = payload.plan.trim();
+        return next;
+      });
+
+      setPlanApprovals((prev) => {
+        const next = [...prev];
+        next[index] = false;
+        return next;
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Regeneration failed";
+      setError(message);
+    } finally {
+      setPlanLoadingIndex((current) => (current === index ? null : current));
     }
   }
 
@@ -647,6 +773,9 @@ export default function Page() {
                         return next;
                       })
                     }
+                    onChangePlan={updatePlanText}
+                    onRegeneratePlan={regeneratePlan}
+                    regeneratingIndex={planLoadingIndex}
                     canProceed={allPlansApproved}
                     onNext={() => setStep(2)}
                   />
@@ -656,19 +785,12 @@ export default function Page() {
                   <StepTwo
                     loading={loading}
                     isStreaming={isStreaming}
-                    showStreamPanel={showStreamPanel}
                     pagePlans={pagePlans}
-                    activeStreamIndex={activeStreamIndex}
-                    streamingIndex={streamingIndex}
-                    streamError={streamError}
-                    streamedCode={streamedCode}
                     files={files}
                     validation={validation}
                     layoutFragments={layoutFragments}
                     stepTwoReady={stepTwoReady}
                     onGenerateAll={generateAndValidate}
-                    onStream={streamCodePreview}
-                    onStopStreaming={stopStreaming}
                     onPreview={openPreview}
                     onNext={() => setStep(3)}
                   />
@@ -705,6 +827,30 @@ export default function Page() {
             </p>
           )}
         </div>
+
+        <StreamConsole
+          visible={showStreamPanel}
+          detached={streamPanelDetached}
+          position={streamPanelPosition}
+          size={streamPanelSize}
+          onMove={setStreamPanelPosition}
+          onResize={setStreamPanelSize}
+          onDetachToggle={() => setStreamPanelDetached((prev) => !prev)}
+          isStreaming={isStreaming}
+          pagePlans={pagePlans}
+          activeStreamIndex={activeStreamIndex}
+          streamingIndex={streamingIndex}
+          streamError={streamError}
+          streamedCode={streamedCode}
+          onStream={handleStreamPreview}
+          onStopStreaming={stopStreaming}
+        />
+
+        <SandboxPreview
+          files={files}
+          selectedPath={sandboxPath}
+          onSelect={setSandboxPath}
+        />
       </div>
     </main>
   );
@@ -728,8 +874,22 @@ function DirectionalCard({
         initial="enter"
         animate="center"
         exit="exit"
-        className="relative overflow-hidden rounded-3xl border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] p-8 md:p-10 shadow-xl"
+        className="relative overflow-hidden rounded-3xl border border-white/10 bg-[radial-gradient(circle_at_top,#283b66_0%,rgba(9,13,23,0.92)_45%,rgba(4,7,14,0.9)_100%)] p-8 md:p-10 shadow-[0px_20px_60px_rgba(0,0,0,0.45)]"
       >
+        <div className="mb-6">
+          <div className="flex items-center justify-between text-xs uppercase tracking-[0.25em] text-slate-400">
+            <span>{STEP_LABELS[step]}</span>
+            <span>
+              Step {step} of {TOTAL_STEPS}
+            </span>
+          </div>
+          <div className="mt-3 h-2 rounded-full bg-white/10">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-indigo-400 via-sky-400 to-emerald-400"
+              style={{ width: `${(step / TOTAL_STEPS) * 100}%` }}
+            />
+          </div>
+        </div>
         {children}
       </motion.article>
     </AnimatePresence>
@@ -749,6 +909,9 @@ function StepOne({
   onToggleExpand,
   onApprovePlan,
   onUndoPlan,
+  onChangePlan,
+  onRegeneratePlan,
+  regeneratingIndex,
   canProceed,
   onNext,
 }: {
@@ -764,6 +927,9 @@ function StepOne({
   onToggleExpand: (index: number) => void;
   onApprovePlan: (index: number) => void;
   onUndoPlan: (index: number) => void;
+  onChangePlan: (index: number, value: string) => void;
+  onRegeneratePlan: (index: number) => Promise<void> | void;
+  regeneratingIndex: number | null;
   canProceed: boolean;
   onNext: () => void;
 }) {
@@ -835,6 +1001,14 @@ function StepOne({
 
                 {expanded && (
                   <div className="mt-4 space-y-4">
+                    <label className="block text-xs uppercase tracking-[0.2em] text-slate-400">
+                      Plan details
+                    </label>
+                    <textarea
+                      value={plan}
+                      onChange={(event) => onChangePlan(index, event.target.value)}
+                      className="min-h-32 w-full rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none"
+                    />
                     <PlanMarkup plan={plan} />
                     <div className="flex flex-wrap items-center gap-3">
                       <button
@@ -852,6 +1026,13 @@ function StepOne({
                           Undo
                         </button>
                       )}
+                      <button
+                        onClick={() => onRegeneratePlan(index)}
+                        disabled={regeneratingIndex === index}
+                        className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3 py-1 text-xs text-indigo-200 disabled:opacity-60"
+                      >
+                        {regeneratingIndex === index ? "Regenerating…" : "Regenerate"}
+                      </button>
                       {accepted && (
                         <span className="inline-flex items-center gap-1 text-xs text-emerald-300">
                           <Check className="size-3" /> Approved
@@ -882,37 +1063,23 @@ function StepOne({
 function StepTwo({
   loading,
   isStreaming,
-  showStreamPanel,
   pagePlans,
-  activeStreamIndex,
-  streamingIndex,
-  streamError,
-  streamedCode,
   files,
   validation,
   layoutFragments,
   stepTwoReady,
   onGenerateAll,
-  onStream,
-  onStopStreaming,
   onPreview,
   onNext,
 }: {
   loading: boolean;
   isStreaming: boolean;
-  showStreamPanel: boolean;
   pagePlans: string[];
-  activeStreamIndex: number | null;
-  streamingIndex: number | null;
-  streamError: string | null;
-  streamedCode: string;
   files: GeneratedFile[];
   validation: ValidationResult | null;
   layoutFragments: LayoutFragments | null;
   stepTwoReady: boolean;
   onGenerateAll: () => Promise<void>;
-  onStream: (index: number) => Promise<void>;
-  onStopStreaming: () => void;
   onPreview: (path: string) => void;
   onNext: () => void;
 }) {
@@ -929,99 +1096,17 @@ function StepTwo({
           {loading ? "Working…" : "Generate Code → Validate"}
         </button>
 
-        {!showStreamPanel && (
+        {!pagePlans.length && (
           <p className="text-sm text-slate-400">
-            Use the “View live AI stream” toggle below once you are ready to monitor
-            generation in real time.
+            Capture a plan in step one to begin generating pages.
           </p>
         )}
 
-        {showStreamPanel && pagePlans.length > 0 && (
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-lg font-semibold text-slate-100">
-                  Live code stream
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Pick a page to watch its HTML (without header/footer) render in real time.
-                </p>
-              </div>
-              {isStreaming && (
-                <button
-                  onClick={onStopStreaming}
-                  className="rounded-full border border-red-400/30 bg-red-500/10 px-3 py-1 text-xs text-red-200"
-                >
-                  Stop streaming
-                </button>
-              )}
-            </div>
-
-            <ul className="mt-3 space-y-2 text-sm text-slate-300">
-              {pagePlans.map((planText, index) => {
-                const descriptor = summarizePlan(planText);
-                const isActive = activeStreamIndex === index;
-                const label = isStreaming
-                  ? streamingIndex === index
-                    ? "Streaming…"
-                    : "Busy"
-                  : "Stream code";
-
-                return (
-                  <li
-                    key={index}
-                    className={`flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/5 px-3 py-2 ${
-                      isActive ? "border-indigo-400/40" : ""
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 text-slate-200">
-                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">
-                          Page {index + 1}
-                        </span>
-                        {isActive && !isStreaming && (
-                          <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-200">
-                            Last streamed
-                          </span>
-                        )}
-                      </div>
-                      <p className="truncate text-xs text-slate-400">{descriptor}</p>
-                    </div>
-                    <button
-                      onClick={() => onStream(index)}
-                      disabled={loading || isStreaming}
-                      className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3 py-1 text-xs text-indigo-200 disabled:opacity-50"
-                    >
-                      {label}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-
-            {streamError && (
-              <div className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                {streamError}
-              </div>
-            )}
-
-            {(streamedCode || isStreaming) && (
-              <div className="mt-4">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>
-                    Output
-                    {activeStreamIndex !== null
-                      ? ` • Page ${activeStreamIndex + 1}`
-                      : ""}
-                  </span>
-                  {isStreaming && <span className="text-indigo-200">Streaming…</span>}
-                </div>
-                <pre className="mt-2 max-h-64 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-4 text-[11px] leading-relaxed text-emerald-100 whitespace-pre-wrap">
-                  {streamedCode || "Waiting for the model…"}
-                </pre>
-              </div>
-            )}
-          </div>
+        {pagePlans.length > 0 && (
+          <p className="text-sm text-slate-400">
+            The live streaming console below tracks generation in real time. You can
+            detach it if you prefer a floating window.
+          </p>
         )}
 
         {layoutFragments && (
@@ -1170,6 +1255,309 @@ function StepThree({
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+type StreamConsoleProps = {
+  visible: boolean;
+  detached: boolean;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+  onMove: (next: { x: number; y: number }) => void;
+  onResize: (next: { width: number; height: number }) => void;
+  onDetachToggle: () => void;
+  isStreaming: boolean;
+  pagePlans: string[];
+  activeStreamIndex: number | null;
+  streamingIndex: number | null;
+  streamError: string | null;
+  streamedCode: string;
+  onStream: (index: number) => Promise<void>;
+  onStopStreaming: () => void;
+};
+
+function StreamConsole({
+  visible,
+  detached,
+  position,
+  size,
+  onMove,
+  onResize,
+  onDetachToggle,
+  isStreaming,
+  pagePlans,
+  activeStreamIndex,
+  streamingIndex,
+  streamError,
+  streamedCode,
+  onStream,
+  onStopStreaming,
+}: StreamConsoleProps) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const dragState = useRef<
+    | {
+        mode: "move" | "resize";
+        startX: number;
+        startY: number;
+        originX: number;
+        originY: number;
+        originWidth: number;
+        originHeight: number;
+      }
+    | null
+  >(null);
+  function clampSize(width: number, height: number) {
+    const minWidth = 320;
+    const minHeight = 200;
+    const maxWidth = window.innerWidth - 40;
+    const maxHeight = window.innerHeight - 40;
+    return {
+      width: Math.min(Math.max(width, minWidth), maxWidth),
+      height: Math.min(Math.max(height, minHeight), maxHeight),
+    };
+  }
+
+  const handlePointerMove = useCallback(
+    (event: PointerEvent) => {
+      const state = dragState.current;
+      if (!state) return;
+
+      if (state.mode === "move") {
+        const panelWidth = panelRef.current?.offsetWidth ?? size.width;
+        const panelHeight = panelRef.current?.offsetHeight ?? size.height;
+        const nextX = state.originX + (event.clientX - state.startX);
+        const nextY = state.originY + (event.clientY - state.startY);
+        const clampedX = Math.min(
+          Math.max(nextX, 0),
+          window.innerWidth - panelWidth - 24
+        );
+        const clampedY = Math.min(
+          Math.max(nextY, 0),
+          window.innerHeight - panelHeight - 24
+        );
+        onMove({ x: clampedX, y: clampedY });
+      } else {
+        const nextWidth = state.originWidth + (event.clientX - state.startX);
+        const nextHeight = state.originHeight + (event.clientY - state.startY);
+        onResize(clampSize(nextWidth, nextHeight));
+      }
+    },
+    [onMove, onResize, size.height, size.width]
+  );
+
+  const handlePointerUp = useCallback(() => {
+    dragState.current = null;
+    window.removeEventListener("pointermove", handlePointerMove);
+    window.removeEventListener("pointerup", handlePointerUp);
+  }, [handlePointerMove]);
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [handlePointerMove, handlePointerUp]);
+
+  if (!visible) {
+    return null;
+  }
+
+  function startInteraction(
+    event: React.PointerEvent<HTMLDivElement>,
+    mode: "move" | "resize"
+  ) {
+    if (!detached) return;
+    event.preventDefault();
+    const rect = panelRef.current?.getBoundingClientRect();
+    dragState.current = {
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: rect ? rect.left : position.x,
+      originY: rect ? rect.top : position.y,
+      originWidth: rect ? rect.width : size.width,
+      originHeight: rect ? rect.height : size.height,
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  }
+
+  const panelStyle = detached
+    ? {
+        position: "fixed" as const,
+        top: position.y,
+        left: position.x,
+        width: size.width,
+        height: size.height,
+        zIndex: 40,
+      }
+    : {};
+
+  return (
+    <div
+      ref={panelRef}
+      style={panelStyle}
+      className={`mt-6 ${
+        detached
+          ? "relative pointer-events-auto rounded-3xl border border-white/10 bg-white/5 shadow-2xl backdrop-blur-xl"
+          : visible
+          ? "relative rounded-3xl border border-white/10 bg-white/5 p-4"
+          : "hidden"
+      }`}
+    >
+      <div
+        className={`flex items-center justify-between gap-2 ${
+          detached ? "cursor-move px-4 py-3" : "px-1"
+        }`}
+        onPointerDown={(event) => startInteraction(event, "move")}
+      >
+        <div>
+          <h3 className="text-lg font-semibold text-slate-100">Live code stream</h3>
+          <p className="text-xs text-slate-400">
+            Monitor generation and stream any page on demand.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {isStreaming && (
+            <button
+              onClick={onStopStreaming}
+              className="rounded-full border border-red-400/30 bg-red-500/10 px-3 py-1 text-xs text-red-200"
+            >
+              Stop
+            </button>
+          )}
+          <button
+            onClick={onDetachToggle}
+            className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3 py-1 text-xs text-indigo-200"
+          >
+            {detached ? "Dock" : "Detach"}
+          </button>
+        </div>
+      </div>
+
+      <div className={`space-y-3 ${detached ? "px-4 pb-4" : "mt-4"}`}>
+        {pagePlans.length === 0 ? (
+          <p className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-slate-400">
+            Generate plans to enable live streaming.
+          </p>
+        ) : (
+          <ul className="space-y-2 text-sm text-slate-300">
+            {pagePlans.map((planText, index) => {
+              const descriptor = summarizePlan(planText);
+              const isActive = activeStreamIndex === index;
+              const label = isStreaming
+                ? streamingIndex === index
+                  ? "Streaming…"
+                  : "Busy"
+                : "Stream";
+
+              return (
+                <li
+                  key={index}
+                  className={`flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/5 px-3 py-2 ${
+                    isActive ? "border-indigo-400/40" : ""
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-slate-200">
+                      <span className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                        Page {index + 1}
+                      </span>
+                      {isActive && !isStreaming && (
+                        <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-200">
+                          Last streamed
+                        </span>
+                      )}
+                    </div>
+                    <p className="truncate text-xs text-slate-400">{descriptor}</p>
+                  </div>
+                  <button
+                    onClick={() => onStream(index)}
+                    disabled={isStreaming}
+                    className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3 py-1 text-xs text-indigo-200 disabled:opacity-50"
+                  >
+                    {label}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {streamError && (
+          <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            {streamError}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span>
+              Output
+              {activeStreamIndex !== null ? ` • Page ${activeStreamIndex + 1}` : ""}
+            </span>
+            {isStreaming && <span className="text-indigo-200">Streaming…</span>}
+          </div>
+          <pre className="max-h-60 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-4 text-[11px] leading-relaxed text-emerald-100 whitespace-pre-wrap">
+            {streamedCode || (isStreaming ? "Waiting for the model…" : "")}
+          </pre>
+        </div>
+      </div>
+
+      {detached && (
+        <div
+          className="absolute bottom-2 right-2 h-4 w-4 cursor-se-resize"
+          onPointerDown={(event) => startInteraction(event, "resize")}
+        />
+      )}
+    </div>
+  );
+}
+
+type SandboxPreviewProps = {
+  files: GeneratedFile[];
+  selectedPath: string | null;
+  onSelect: (path: string | null) => void;
+};
+
+function SandboxPreview({ files, selectedPath, onSelect }: SandboxPreviewProps) {
+  if (files.length === 0) {
+    return null;
+  }
+
+  const current = files.find((file) => file.path === selectedPath) ?? files[0];
+
+  return (
+    <div className="mt-10 rounded-3xl border border-white/10 bg-white/5 p-6 shadow-[0px_20px_60px_rgba(0,0,0,0.35)]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-slate-100">Sandbox preview</h3>
+          <p className="text-xs text-slate-400">
+            Inspect any generated page in an isolated iframe without leaving the flow.
+          </p>
+        </div>
+        <select
+          value={current?.path ?? ""}
+          onChange={(event) => onSelect(event.target.value)}
+          className="rounded-md border border-white/10 bg-black/40 px-3 py-1 text-sm text-slate-100"
+        >
+          {files.map((file) => (
+            <option key={file.path} value={file.path}>
+              {file.path}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="mt-4 h-[420px] overflow-hidden rounded-2xl border border-white/10 bg-black/40">
+        <iframe
+          title={current?.path ?? "sandbox"}
+          className="h-full w-full"
+          sandbox="allow-same-origin allow-scripts"
+          srcDoc={current?.content ?? ""}
+        />
+      </div>
     </div>
   );
 }
