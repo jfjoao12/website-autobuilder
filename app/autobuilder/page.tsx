@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
 import { Check, Download, Eye } from "lucide-react";
 import JSZip from "jszip";
@@ -12,7 +13,6 @@ const DEFAULT_MODELS = [
   "qwen3:7b-instruct",
 ];
 
-<<<<<<< HEAD
 const STEP_LABELS: Record<Step, string> = {
   1: "Plan",
   2: "Build",
@@ -23,9 +23,6 @@ const STEP_LABELS: Record<Step, string> = {
 const TOTAL_STEPS = 4;
 
 type Step = 1 | 2 | 3 | 4;
-=======
-type Step = 1 | 2 | 3;
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
 
 type GeneratedFile = { path: string; content: string };
 
@@ -39,7 +36,7 @@ type LayoutFragments = {
   footer: string;
 };
 
-type OllamaAction = "plan" | "models" | "code" | "layout";
+type OllamaAction = "plan" | "models" | "code" | "layout" | "plan-page";
 
 async function requestOllama<T extends Record<string, unknown>>(
   model: string,
@@ -142,6 +139,18 @@ function appendLayout(html: string, header: string, footer: string) {
   }
 
   return `<html>\n<body>\n${bodyWrapped}\n</body>\n</html>`;
+}
+
+function sanitizeGeneratedCode(code: string) {
+  let output = code.trim();
+
+  if (output.startsWith("```") && output.endsWith("```")) {
+    output = output.replace(/^```[a-zA-Z0-9-]*\s*/, "").replace(/```$/, "");
+  }
+
+  output = output.replace(/```html\s*/gi, "");
+
+  return output.trim();
 }
 
 function PlanMarkup({ plan }: { plan: string }) {
@@ -271,7 +280,6 @@ export default function Page() {
 
   const [pagePlans, setPagePlans] = useState<string[]>([]);
   const [planApprovals, setPlanApprovals] = useState<boolean[]>([]);
-<<<<<<< HEAD
   const [expandedPlanIndex, setExpandedPlanIndex] = useState<number | null>(
     null
   );
@@ -284,15 +292,6 @@ export default function Page() {
   const [layoutFragments, setLayoutFragments] =
     useState<LayoutFragments | null>(null);
   const [sandboxPath, setSandboxPath] = useState<string | null>(null);
-=======
-  const [expandedPlans, setExpandedPlans] = useState<boolean[]>([]);
-
-  const [files, setFiles] = useState<GeneratedFile[]>([]);
-  const [validation, setValidation] = useState<ValidationResult | null>(null);
-  const [layoutFragments, setLayoutFragments] = useState<LayoutFragments | null>(
-    null
-  );
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
 
   const [streamingIndex, setStreamingIndex] = useState<number | null>(null);
   const [activeStreamIndex, setActiveStreamIndex] = useState<number | null>(
@@ -301,7 +300,6 @@ export default function Page() {
   const [streamedCode, setStreamedCode] = useState("");
   const [streamError, setStreamError] = useState<string | null>(null);
   const [showStreamPanel, setShowStreamPanel] = useState(false);
-<<<<<<< HEAD
   const [streamPanelDetached, setStreamPanelDetached] = useState(false);
   const [streamPanelPosition, setStreamPanelPosition] = useState({
     x: 80,
@@ -311,8 +309,6 @@ export default function Page() {
     width: 480,
     height: 340,
   });
-=======
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
 
   const [codeReady, setCodeReady] = useState(false);
   const [layoutReady, setLayoutReady] = useState(false);
@@ -363,6 +359,20 @@ export default function Page() {
       streamControllerRef.current?.abort();
     };
   }, [model]);
+
+  useEffect(() => {
+    if (files.length === 0) {
+      setSandboxPath(null);
+      return;
+    }
+
+    setSandboxPath((current) => {
+      if (current && files.some((file) => file.path === current)) {
+        return current;
+      }
+      return files[0]?.path ?? null;
+    });
+  }, [files]);
 
   const variants: Variants = {
     enter: (dir: number) => ({
@@ -442,6 +452,7 @@ export default function Page() {
     setStreamedCode("");
     setStreamError(null);
     setShowStreamPanel(false);
+    setStreamPanelDetached(false);
     setFiles([]);
     setValidation(null);
     setLayoutFragments(null);
@@ -453,6 +464,7 @@ export default function Page() {
     setStep(1);
     setLoading(true);
     setError(null);
+    setValidation(null);
     setPagePlans([]);
 
     try {
@@ -468,13 +480,9 @@ export default function Page() {
       const trimmedPlans = result.plans.map((plan) => plan.trim());
       setPagePlans(trimmedPlans);
       setPlanApprovals(new Array(trimmedPlans.length).fill(false));
-<<<<<<< HEAD
       setExpandedPlanIndex(0); // Open the first plan by default
       setEditingPlanIndex(null);
       setPlanLoadingIndex(null);
-=======
-      setExpandedPlans(new Array(trimmedPlans.length).fill(false));
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Failed to create plan";
@@ -499,7 +507,6 @@ export default function Page() {
       const generated: GeneratedFile[] = [];
 
       for (let i = 0; i < pagePlans.length; i++) {
-<<<<<<< HEAD
         const raw = await streamCodeForPage(i, pagePlans[i], {
           applyLayout: false,
           updateFiles: false,
@@ -512,22 +519,12 @@ export default function Page() {
           },
         });
         if (!raw) {
-=======
-        const result = await requestOllama<{ code?: string }>(model, "code", {
-          plan: pagePlans[i],
-          allPlans: pagePlans,
-          pageIndex: i,
-        });
-
-        const code = typeof result.code === "string" ? result.code.trim() : "";
-        if (!code) {
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
           throw new Error(`Code generation failed for page ${i + 1}`);
         }
 
         generated.push({
           path: `page-${i + 1}.html`,
-          content: code,
+          content: raw,
         });
       }
 
@@ -553,6 +550,7 @@ export default function Page() {
       setLayoutFragments({ header: headerFragment, footer: footerFragment });
       setValidation(mockValidate(withLayout));
       setStepTwoReady(true);
+      setStreamedCode(withLayout[withLayout.length - 1]?.content ?? "");
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Failed to generate code";
@@ -562,11 +560,10 @@ export default function Page() {
     }
   }
 
-  async function streamCodePreview(index: number) {
+  async function handleStreamPreview(index: number) {
     const plan = pagePlans[index];
     if (!plan) return;
 
-<<<<<<< HEAD
     try {
       await streamCodeForPage(index, plan, {
         applyLayout: Boolean(layoutFragments),
@@ -614,8 +611,6 @@ export default function Page() {
       totalPages: pagePlans.length,
     };
 
-=======
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
     streamControllerRef.current?.abort();
     const controller = new AbortController();
     streamControllerRef.current = controller;
@@ -624,7 +619,9 @@ export default function Page() {
     setStreamingIndex(index);
     setActiveStreamIndex(index);
     setStreamedCode("");
-    setValidation(null);
+    if (resetValidation) {
+      setValidation(null);
+    }
 
     let aggregated = "";
     let completed = false;
@@ -667,12 +664,12 @@ export default function Page() {
         aggregated += finalFlush;
       }
 
-      aggregated = aggregated.trim();
+      aggregated = sanitizeGeneratedCode(aggregated);
       if (aggregated.length === 0) {
         throw new Error("No code returned by the model");
       }
 
-      if (layoutFragments) {
+      if (applyLayout && layoutFragments) {
         aggregated = appendLayout(
           aggregated,
           layoutFragments.header,
@@ -681,15 +678,20 @@ export default function Page() {
       }
 
       completed = true;
+
+      if (updateFiles) {
+        setFiles((prev) => {
+          const next = [...prev];
+          next[index] = {
+            path: `page-${index + 1}.html`,
+            content: aggregated,
+          };
+          return next;
+        });
+      }
+
       setStreamedCode(aggregated);
-      setFiles((prev) => {
-        const next = [...prev];
-        next[index] = {
-          path: `page-${index + 1}.html`,
-          content: aggregated,
-        };
-        return next;
-      });
+      return aggregated;
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         // streaming cancelled by user
@@ -701,6 +703,7 @@ export default function Page() {
           setActiveStreamIndex(null);
         }
       }
+      throw err;
     } finally {
       if (streamControllerRef.current === controller) {
         streamControllerRef.current = null;
@@ -713,7 +716,6 @@ export default function Page() {
     }
   }
 
-<<<<<<< HEAD
   function updatePlanText(index: number, value: string) {
     setPagePlans((prev) => {
       const next = [...prev];
@@ -765,8 +767,6 @@ export default function Page() {
     }
   }
 
-=======
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
   function stopStreaming() {
     streamControllerRef.current?.abort();
   }
@@ -858,6 +858,9 @@ export default function Page() {
                         return next;
                       })
                     }
+                    onChangePlan={updatePlanText}
+                    onRegeneratePlan={regeneratePlan}
+                    regeneratingIndex={planLoadingIndex}
                     canProceed={allPlansApproved}
                     onNext={() => setStep(2)}
                   />
@@ -867,19 +870,12 @@ export default function Page() {
                   <StepTwo
                     loading={loading}
                     isStreaming={isStreaming}
-                    showStreamPanel={showStreamPanel}
                     pagePlans={pagePlans}
-                    activeStreamIndex={activeStreamIndex}
-                    streamingIndex={streamingIndex}
-                    streamError={streamError}
-                    streamedCode={streamedCode}
                     files={files}
                     validation={validation}
                     layoutFragments={layoutFragments}
                     stepTwoReady={stepTwoReady}
                     onGenerateAll={generateAndValidate}
-                    onStream={streamCodePreview}
-                    onStopStreaming={stopStreaming}
                     onPreview={openPreview}
                     onNext={() => setStep(3)}
                   />
@@ -916,6 +912,30 @@ export default function Page() {
             </p>
           )}
         </div>
+
+        <StreamConsole
+          visible={showStreamPanel}
+          detached={streamPanelDetached}
+          position={streamPanelPosition}
+          size={streamPanelSize}
+          onMove={setStreamPanelPosition}
+          onResize={setStreamPanelSize}
+          onDetachToggle={() => setStreamPanelDetached((prev) => !prev)}
+          isStreaming={isStreaming}
+          pagePlans={pagePlans}
+          activeStreamIndex={activeStreamIndex}
+          streamingIndex={streamingIndex}
+          streamError={streamError}
+          streamedCode={streamedCode}
+          onStream={handleStreamPreview}
+          onStopStreaming={stopStreaming}
+        />
+
+        <SandboxPreview
+          files={files}
+          selectedPath={sandboxPath}
+          onSelect={setSandboxPath}
+        />
       </div>
     </main>
   );
@@ -939,7 +959,6 @@ function DirectionalCard({
         initial="enter"
         animate="center"
         exit="exit"
-<<<<<<< HEAD
         className="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-slate-800/90 via-slate-900/95 to-slate-950 backdrop-blur-xl p-8 md:p-10 shadow-[0px_20px_60px_rgba(0,0,0,0.45)] hover:shadow-indigo-500/10 transition-all duration-500 transform hover:scale-[1.02] hover:border-indigo-500/20"
       >
         <div className="mb-6">
@@ -958,10 +977,6 @@ function DirectionalCard({
             />
           </div>
         </div>
-=======
-        className="relative overflow-hidden rounded-3xl border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] p-8 md:p-10 shadow-xl"
-      >
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
         {children}
       </motion.article>
     </AnimatePresence>
@@ -980,13 +995,9 @@ function StepOne({
   expandedPlanIndex,
   onToggleExpand,
   onApprovePlan,
-<<<<<<< HEAD
   onChangePlan,
   onRegeneratePlan,
   regeneratingIndex,
-=======
-  onUndoPlan,
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
   canProceed,
   onNext,
 }: {
@@ -1003,13 +1014,9 @@ function StepOne({
   setEditingPlanIndex: (index: number | null) => void;
   onToggleExpand: (index: number) => void;
   onApprovePlan: (index: number) => void;
-<<<<<<< HEAD
   onChangePlan: (index: number, value: string) => void;
   onRegeneratePlan: (index: number) => Promise<void> | void;
   regeneratingIndex: number | null;
-=======
-  onUndoPlan: (index: number) => void;
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
   canProceed: boolean;
   onNext: () => void;
 }) {
@@ -1084,7 +1091,6 @@ function StepOne({
 
                 {isExpanded && (
                   <div className="mt-4 space-y-4">
-<<<<<<< HEAD
                     <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
                       <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
                         Formatted plan
@@ -1107,9 +1113,6 @@ function StepOne({
                       />
                     </div>
 
-=======
-                    <PlanMarkup plan={plan} />
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
                     <div className="flex flex-wrap items-center gap-3">
                       <button
                         onClick={() => onApprovePlan(index)}
@@ -1126,7 +1129,6 @@ function StepOne({
                           Undo
                         </button>
                       )}
-<<<<<<< HEAD
                       <button
                         onClick={() => onRegeneratePlan(index)}
                         disabled={regeneratingIndex === index}
@@ -1136,8 +1138,6 @@ function StepOne({
                           ? "Regenerating…"
                           : "Regenerate"}
                       </button>
-=======
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
                       {accepted && (
                         <span className="inline-flex items-center gap-1 text-xs text-emerald-300">
                           <Check className="size-3" /> Approved
@@ -1168,37 +1168,23 @@ function StepOne({
 function StepTwo({
   loading,
   isStreaming,
-  showStreamPanel,
   pagePlans,
-  activeStreamIndex,
-  streamingIndex,
-  streamError,
-  streamedCode,
   files,
   validation,
   layoutFragments,
   stepTwoReady,
   onGenerateAll,
-  onStream,
-  onStopStreaming,
   onPreview,
   onNext,
 }: {
   loading: boolean;
   isStreaming: boolean;
-  showStreamPanel: boolean;
   pagePlans: string[];
-  activeStreamIndex: number | null;
-  streamingIndex: number | null;
-  streamError: string | null;
-  streamedCode: string;
   files: GeneratedFile[];
   validation: ValidationResult | null;
   layoutFragments: LayoutFragments | null;
   stepTwoReady: boolean;
   onGenerateAll: () => Promise<void>;
-  onStream: (index: number) => Promise<void>;
-  onStopStreaming: () => void;
   onPreview: (path: string) => void;
   onNext: () => void;
 }) {
@@ -1215,107 +1201,17 @@ function StepTwo({
           {loading ? "Working…" : "Generate Code → Validate"}
         </button>
 
-        {!showStreamPanel && (
+        {!pagePlans.length && (
           <p className="text-sm text-slate-400">
-            Use the “View live AI stream” toggle below once you are ready to monitor
-            generation in real time.
+            Capture a plan in step one to begin generating pages.
           </p>
         )}
 
-<<<<<<< HEAD
         {pagePlans.length > 0 && (
           <p className="text-sm text-slate-400">
             The live streaming console below tracks generation in real time. You
             can detach it if you prefer a floating window.
           </p>
-=======
-        {showStreamPanel && pagePlans.length > 0 && (
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-lg font-semibold text-slate-100">
-                  Live code stream
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Pick a page to watch its HTML (without header/footer) render in real time.
-                </p>
-              </div>
-              {isStreaming && (
-                <button
-                  onClick={onStopStreaming}
-                  className="rounded-full border border-red-400/30 bg-red-500/10 px-3 py-1 text-xs text-red-200"
-                >
-                  Stop streaming
-                </button>
-              )}
-            </div>
-
-            <ul className="mt-3 space-y-2 text-sm text-slate-300">
-              {pagePlans.map((planText, index) => {
-                const descriptor = summarizePlan(planText);
-                const isActive = activeStreamIndex === index;
-                const label = isStreaming
-                  ? streamingIndex === index
-                    ? "Streaming…"
-                    : "Busy"
-                  : "Stream code";
-
-                return (
-                  <li
-                    key={index}
-                    className={`flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/5 px-3 py-2 ${
-                      isActive ? "border-indigo-400/40" : ""
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 text-slate-200">
-                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400">
-                          Page {index + 1}
-                        </span>
-                        {isActive && !isStreaming && (
-                          <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-200">
-                            Last streamed
-                          </span>
-                        )}
-                      </div>
-                      <p className="truncate text-xs text-slate-400">{descriptor}</p>
-                    </div>
-                    <button
-                      onClick={() => onStream(index)}
-                      disabled={loading || isStreaming}
-                      className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3 py-1 text-xs text-indigo-200 disabled:opacity-50"
-                    >
-                      {label}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-
-            {streamError && (
-              <div className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                {streamError}
-              </div>
-            )}
-
-            {(streamedCode || isStreaming) && (
-              <div className="mt-4">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>
-                    Output
-                    {activeStreamIndex !== null
-                      ? ` • Page ${activeStreamIndex + 1}`
-                      : ""}
-                  </span>
-                  {isStreaming && <span className="text-indigo-200">Streaming…</span>}
-                </div>
-                <pre className="mt-2 max-h-64 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-4 text-[11px] leading-relaxed text-emerald-100 whitespace-pre-wrap">
-                  {streamedCode || "Waiting for the model…"}
-                </pre>
-              </div>
-            )}
-          </div>
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
         )}
 
         {layoutFragments && (
@@ -1481,7 +1377,6 @@ function StepThree({
     </div>
   );
 }
-<<<<<<< HEAD
 
 type StreamConsoleProps = {
   visible: boolean;
@@ -1830,5 +1725,3 @@ function SandboxPreview({
     </div>
   );
 }
-=======
->>>>>>> parent of daad79f (Added sandbox, plan edit and re-generation)
