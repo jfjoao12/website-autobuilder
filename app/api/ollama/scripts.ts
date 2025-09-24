@@ -79,46 +79,6 @@ export async function generateLayoutFragments(
   return { header, footer };
 }
 
-export async function regeneratePlanForPage(
-  plans: string[],
-  pageIndex: number,
-  model: string
-): Promise<string> {
-  const total = plans.length;
-  const target = plans[pageIndex];
-
-  const planSummaries = plans
-    .map((plan, idx) => {
-      const firstLine = plan.split(/\r?\n/).find((line) => line.trim());
-      return `Page ${idx + 1}: ${firstLine ?? plan.slice(0, 80)}`;
-    })
-    .join("\n");
-
-  const prompt = [
-    `You are revising Page ${pageIndex + 1} of a ${total}-page website plan.`,
-    "Refresh this page plan to improve clarity, flow, and alignment with the other pages.",
-    "Keep the existing structure if possible, but make it more compelling and specific.",
-    "Return only the page plan starting with the exact heading \"### Page <number>: <Title>\" and keep concise bullet points.",
-    "Current plans for context:",
-    planSummaries,
-    "Current detailed plan to refine:",
-    target,
-  ].join("\n\n");
-
-  const raw = await callOllama(model, prompt, false);
-
-  if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error("Plan regeneration failed");
-  }
-
-  const trimmed = raw.trim();
-  if (!trimmed.startsWith(PAGE_MARKER)) {
-    return `${PAGE_MARKER} ${pageIndex + 1}: Updated\n${trimmed}`;
-  }
-
-  return trimmed;
-}
-
 export async function listModels(host: string = DEFAULT_HOST) {
   const base = host.endsWith("/") ? host.slice(0, -1) : host;
   const response = await fetch(`${base}/api/tags`, {

@@ -4,7 +4,6 @@ import {
   generateCode,
   generateLayoutFragments,
   generatePlan,
-  regeneratePlanForPage,
   listModels,
   streamCode,
 } from "../ollama/scripts";
@@ -127,27 +126,6 @@ export async function POST(req: Request) {
           error instanceof Error ? error.message : "Failed to stream code";
         return NextResponse.json({ error: message }, { status: 500 });
       }
-    }
-
-    if (action === "plan-page") {
-      const planList = Array.isArray(plans)
-        ? plans.filter((entry): entry is string => typeof entry === "string")
-        : [];
-
-      if (
-        planList.length === 0 ||
-        typeof pageIndex !== "number" ||
-        !Number.isFinite(pageIndex) ||
-        planList[pageIndex] === undefined
-      ) {
-        return NextResponse.json(
-          { error: "Missing plan context" },
-          { status: 400 }
-        );
-      }
-
-      const updated = await regeneratePlanForPage(planList, pageIndex, model);
-      return NextResponse.json({ plan: updated });
     }
 
     if (action === "layout") {
