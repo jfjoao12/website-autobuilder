@@ -16,12 +16,13 @@ const DEFAULT_MODELS = [
 const STEP_LABELS: Record<Step, string> = {
   1: "Plan",
   2: "Build",
-  3: "Review",
+  3: "Layout",
+  4: "Review",
 };
 
-const TOTAL_STEPS = 3;
+const TOTAL_STEPS = 4;
 
-type Step = 1 | 2 | 3;
+type Step = 1 | 2 | 3 | 4;
 
 type GeneratedFile = { path: string; content: string };
 
@@ -60,7 +61,10 @@ function mockValidate(files: GeneratedFile[]): ValidationResult {
   const issues: string[] = [];
 
   files.forEach((file) => {
-    if (!file.content.includes("<!doctype html>") || !file.content.includes("<html")) {
+    if (
+      !file.content.includes("<!doctype html>") ||
+      !file.content.includes("<html")
+    ) {
       issues.push(`${file.path}: Missing basic HTML structure`);
     }
   });
@@ -124,11 +128,7 @@ function appendLayout(html: string, header: string, footer: string) {
     return output;
   }
 
-  const bodyWrapped = [
-    cleanHeader,
-    output.trim(),
-    cleanFooter,
-  ]
+  const bodyWrapped = [cleanHeader, output.trim(), cleanFooter]
     .filter((segment) => segment.length > 0)
     .join("\n");
 
@@ -163,9 +163,15 @@ function PlanMarkup({ plan }: { plan: string }) {
     const { type, items } = listBuffer;
     const ListTag = type === "ul" ? "ul" : "ol";
     elements.push(
-      <ListTag key={`${elements.length}-list`} className="ml-5 list-inside space-y-1">
+      <ListTag
+        key={`${elements.length}-list`}
+        className="ml-5 list-inside space-y-1"
+      >
         {items.map((item, idx) => (
-          <li key={`${elements.length}-item-${idx}`} className="leading-relaxed text-slate-300">
+          <li
+            key={`${elements.length}-item-${idx}`}
+            className="leading-relaxed text-slate-300"
+          >
             {item}
           </li>
         ))}
@@ -185,7 +191,10 @@ function PlanMarkup({ plan }: { plan: string }) {
     if (/^###\s+/.test(line)) {
       flushList();
       elements.push(
-        <h3 key={`${index}-h3`} className="text-base font-semibold text-indigo-200">
+        <h3
+          key={`${index}-h3`}
+          className="text-base font-semibold text-indigo-200"
+        >
           {line.replace(/^###\s*/, "")}
         </h3>
       );
@@ -195,7 +204,10 @@ function PlanMarkup({ plan }: { plan: string }) {
     if (/^##\s+/.test(line)) {
       flushList();
       elements.push(
-        <h2 key={`${index}-h2`} className="text-lg font-semibold text-slate-100">
+        <h2
+          key={`${index}-h2`}
+          className="text-lg font-semibold text-slate-100"
+        >
           {line.replace(/^##\s*/, "")}
         </h2>
       );
@@ -224,7 +236,10 @@ function PlanMarkup({ plan }: { plan: string }) {
 
     flushList();
     elements.push(
-      <p key={`${index}-p`} className="text-sm leading-relaxed text-slate-200">
+      <p
+        key={`${index}-p`}
+        className="text-sm leading-relaxed text-slate-200 tracking-wide font-medium"
+      >
         {line}
       </p>
     );
@@ -243,20 +258,39 @@ export default function Page() {
   const [model, setModel] = useState(DEFAULT_MODELS[0]!);
   const [models, setModels] = useState(DEFAULT_MODELS);
 
+  // Add a beautiful animated gradient background
+  const gradientVariants: Variants = {
+    animate: {
+      background: [
+        "linear-gradient(45deg, #2563eb, #3b82f6, #60a5fa)",
+        "linear-gradient(45deg, #7c3aed, #8b5cf6, #a78bfa)",
+        "linear-gradient(45deg, #2563eb, #3b82f6, #60a5fa)",
+      ],
+      transition: {
+        duration: 10,
+        repeat: Infinity,
+        ease: "linear",
+      },
+    },
+  };
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
 
   const [pagePlans, setPagePlans] = useState<string[]>([]);
   const [planApprovals, setPlanApprovals] = useState<boolean[]>([]);
-  const [expandedPlans, setExpandedPlans] = useState<boolean[]>([]);
-  const [planLoadingIndex, setPlanLoadingIndex] = useState<number | null>(null);
-
-  const [files, setFiles] = useState<GeneratedFile[]>([]);
-  const [validation, setValidation] = useState<ValidationResult | null>(null);
-  const [layoutFragments, setLayoutFragments] = useState<LayoutFragments | null>(
+  const [expandedPlanIndex, setExpandedPlanIndex] = useState<number | null>(
     null
   );
+  const [editingPlanIndex, setEditingPlanIndex] = useState<number | null>(null);
+  const [planLoadingIndex, setPlanLoadingIndex] = useState<number | null>(null);
+
+  const [draftFiles, setDraftFiles] = useState<GeneratedFile[]>([]);
+  const [files, setFiles] = useState<GeneratedFile[]>([]);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [layoutFragments, setLayoutFragments] =
+    useState<LayoutFragments | null>(null);
   const [sandboxPath, setSandboxPath] = useState<string | null>(null);
 
   const [streamingIndex, setStreamingIndex] = useState<number | null>(null);
@@ -267,9 +301,17 @@ export default function Page() {
   const [streamError, setStreamError] = useState<string | null>(null);
   const [showStreamPanel, setShowStreamPanel] = useState(false);
   const [streamPanelDetached, setStreamPanelDetached] = useState(false);
-  const [streamPanelPosition, setStreamPanelPosition] = useState({ x: 80, y: 80 });
-  const [streamPanelSize, setStreamPanelSize] = useState({ width: 480, height: 340 });
+  const [streamPanelPosition, setStreamPanelPosition] = useState({
+    x: 80,
+    y: 80,
+  });
+  const [streamPanelSize, setStreamPanelSize] = useState({
+    width: 480,
+    height: 340,
+  });
 
+  const [codeReady, setCodeReady] = useState(false);
+  const [layoutReady, setLayoutReady] = useState(false);
   const [stepTwoReady, setStepTwoReady] = useState(false);
 
   const streamControllerRef = useRef<AbortController | null>(null);
@@ -304,7 +346,8 @@ export default function Page() {
         }
       } catch (err) {
         if (!active) return;
-        const message = err instanceof Error ? err.message : "Failed to load models";
+        const message =
+          err instanceof Error ? err.message : "Failed to load models";
         setModelsError(message);
       }
     }
@@ -335,7 +378,7 @@ export default function Page() {
     enter: (dir: number) => ({
       x: dir > 0 ? 60 : -60,
       opacity: 0,
-      scale: 0.98,
+      scale: 0.95,
       filter: "blur(8px)",
     }),
     center: {
@@ -343,24 +386,42 @@ export default function Page() {
       opacity: 1,
       scale: 1,
       filter: "blur(0px)",
-      transition: { type: "spring", stiffness: 420, damping: 38 },
+      transition: {
+        type: "spring",
+        stiffness: 420,
+        damping: 38,
+        mass: 0.8,
+      },
     },
     exit: (dir: number) => ({
       x: dir > 0 ? -60 : 60,
       opacity: 0,
-      scale: 0.98,
+      scale: 0.95,
       filter: "blur(8px)",
-      transition: { type: "spring", stiffness: 360, damping: 34 },
+      transition: {
+        type: "spring",
+        stiffness: 360,
+        damping: 34,
+        mass: 0.8,
+      },
     }),
+    hover: {
+      scale: 1.02,
+      transition: {
+        type: "spring",
+        stiffness: 400,
+        damping: 25,
+      },
+    },
   };
 
   const header = useMemo(
     () => (
       <header className="mb-10 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="size-8 rounded-xl bg-indigo-500/20 ring-1 ring-indigo-400/30" />
+          <div className="size-8 rounded-xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 shadow-lg ring-1 ring-white/20" />
           <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-300 font-medium">
               Prototype
             </p>
             <h1 className="text-lg font-semibold text-slate-200">
@@ -419,10 +480,12 @@ export default function Page() {
       const trimmedPlans = result.plans.map((plan) => plan.trim());
       setPagePlans(trimmedPlans);
       setPlanApprovals(new Array(trimmedPlans.length).fill(false));
-      setExpandedPlans(new Array(trimmedPlans.length).fill(false));
+      setExpandedPlanIndex(0); // Open the first plan by default
+      setEditingPlanIndex(null);
       setPlanLoadingIndex(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to create plan";
+      const message =
+        err instanceof Error ? err.message : "Failed to create plan";
       setError(message);
     } finally {
       setLoading(false);
@@ -448,8 +511,13 @@ export default function Page() {
           applyLayout: false,
           updateFiles: false,
           resetValidation: i === 0,
+          context: {
+            topic,
+            plan: pagePlans[i],
+            pageNumber: i + 1,
+            totalPages: pagePlans.length,
+          },
         });
-
         if (!raw) {
           throw new Error(`Code generation failed for page ${i + 1}`);
         }
@@ -484,7 +552,8 @@ export default function Page() {
       setStepTwoReady(true);
       setStreamedCode(withLayout[withLayout.length - 1]?.content ?? "");
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to generate code";
+      const message =
+        err instanceof Error ? err.message : "Failed to generate code";
       setError(message);
     } finally {
       setLoading(false);
@@ -505,7 +574,8 @@ export default function Page() {
       if (err instanceof DOMException && err.name === "AbortError") {
         return;
       }
-      const message = err instanceof Error ? err.message : "Failed to stream code";
+      const message =
+        err instanceof Error ? err.message : "Failed to stream code";
       setError(message);
     }
   }
@@ -517,12 +587,29 @@ export default function Page() {
       applyLayout?: boolean;
       updateFiles?: boolean;
       resetValidation?: boolean;
+      context?: {
+        topic: string;
+        plan: string;
+        pageNumber: number;
+        totalPages: number;
+      };
     } = {}
   ) {
-    const { applyLayout = true, updateFiles = true, resetValidation = false } =
-      options;
+    const {
+      applyLayout = true,
+      updateFiles = true,
+      resetValidation = false,
+    } = options;
 
     if (!plan) return "";
+
+    // Include the website idea in the context
+    const context = {
+      topic,
+      plan,
+      pageNumber: index + 1,
+      totalPages: pagePlans.length,
+    };
 
     streamControllerRef.current?.abort();
     const controller = new AbortController();
@@ -554,8 +641,7 @@ export default function Page() {
       });
 
       if (!response.ok || !response.body) {
-        const message =
-          (await response.text()) || "Streaming request failed";
+        const message = (await response.text()) || "Streaming request failed";
         throw new Error(message);
       }
 
@@ -610,7 +696,8 @@ export default function Page() {
       if (err instanceof DOMException && err.name === "AbortError") {
         // streaming cancelled by user
       } else {
-        const message = err instanceof Error ? err.message : "Failed to stream code";
+        const message =
+          err instanceof Error ? err.message : "Failed to stream code";
         setStreamError(message);
         if (aggregated.trim().length === 0) {
           setActiveStreamIndex(null);
@@ -647,10 +734,14 @@ export default function Page() {
     if (!pagePlans[index]) return;
     setPlanLoadingIndex(index);
     try {
-      const payload = await requestOllama<{ plan?: string }>(model, "plan-page", {
-        plans: pagePlans,
-        pageIndex: index,
-      });
+      const payload = await requestOllama<{ plan?: string }>(
+        model,
+        "plan-page",
+        {
+          plans: pagePlans,
+          pageIndex: index,
+        }
+      );
 
       if (!payload.plan || typeof payload.plan !== "string") {
         throw new Error("Plan regeneration failed");
@@ -658,7 +749,7 @@ export default function Page() {
 
       setPagePlans((prev) => {
         const next = [...prev];
-        next[index] = payload.plan.trim();
+        next[index] = payload.plan?.trim() ?? "";
         return next;
       });
 
@@ -668,7 +759,8 @@ export default function Page() {
         return next;
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Regeneration failed";
+      const message =
+        err instanceof Error ? err.message : "Regeneration failed";
       setError(message);
     } finally {
       setPlanLoadingIndex((current) => (current === index ? null : current));
@@ -731,9 +823,9 @@ export default function Page() {
           </div>
         </div>
 
-        <div className="relative isolate overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] p-3 shadow-2xl shadow-black/30 backdrop-blur-xl">
+        <div className="relative isolate overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] p-3 shadow-2xl shadow-black/30 backdrop-blur-xl mx-auto max-w-4xl">
           <div className="relative grid min-h-[520px] place-items-center rounded-2xl p-4">
-            <div className="relative w-full max-w-3xl">
+            <div className="relative w-full">
               {error && (
                 <div className="mb-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
                   {error}
@@ -751,25 +843,18 @@ export default function Page() {
                     onGenerate={createPlan}
                     pagePlans={pagePlans}
                     planApprovals={planApprovals}
-                    expandedPlans={expandedPlans}
+                    expandedPlanIndex={expandedPlanIndex}
+                    editingPlanIndex={editingPlanIndex}
+                    setEditingPlanIndex={setEditingPlanIndex}
                     onToggleExpand={(index) =>
-                      setExpandedPlans((prev) => {
-                        const next = [...prev];
-                        next[index] = !next[index];
-                        return next;
-                      })
+                      setExpandedPlanIndex(
+                        expandedPlanIndex === index ? null : index
+                      )
                     }
                     onApprovePlan={(index) =>
                       setPlanApprovals((prev) => {
                         const next = [...prev];
-                        next[index] = true;
-                        return next;
-                      })
-                    }
-                    onUndoPlan={(index) =>
-                      setPlanApprovals((prev) => {
-                        const next = [...prev];
-                        next[index] = false;
+                        next[index] = !next[index];
                         return next;
                       })
                     }
@@ -817,7 +902,7 @@ export default function Page() {
               }
             }}
             disabled={step < 2}
-            className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-5 py-2 text-sm text-indigo-200 disabled:opacity-40"
+            className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-5 py-2 text-sm text-indigo-200 disabled:opacity-40 hover:bg-indigo-400/20 hover:border-indigo-400/50 transition-all duration-300 transform hover:scale-105 active:scale-95"
           >
             {showStreamPanel ? "Hide live AI stream" : "View live AI stream"}
           </button>
@@ -874,19 +959,21 @@ function DirectionalCard({
         initial="enter"
         animate="center"
         exit="exit"
-        className="relative overflow-hidden rounded-3xl border border-white/10 bg-[radial-gradient(circle_at_top,#283b66_0%,rgba(9,13,23,0.92)_45%,rgba(4,7,14,0.9)_100%)] p-8 md:p-10 shadow-[0px_20px_60px_rgba(0,0,0,0.45)]"
+        className="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-slate-800/90 via-slate-900/95 to-slate-950 backdrop-blur-xl p-8 md:p-10 shadow-[0px_20px_60px_rgba(0,0,0,0.45)] hover:shadow-indigo-500/10 transition-all duration-500 transform hover:scale-[1.02] hover:border-indigo-500/20"
       >
         <div className="mb-6">
-          <div className="flex items-center justify-between text-xs uppercase tracking-[0.25em] text-slate-400">
-            <span>{STEP_LABELS[step]}</span>
-            <span>
+          <div className="flex items-center justify-between text-xs uppercase tracking-[0.25em] font-medium">
+            <span className="text-indigo-300">{STEP_LABELS[step]}</span>
+            <span className="text-slate-400 bg-slate-800/50 px-3 py-1 rounded-full">
               Step {step} of {TOTAL_STEPS}
             </span>
           </div>
-          <div className="mt-3 h-2 rounded-full bg-white/10">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-indigo-400 via-sky-400 to-emerald-400"
-              style={{ width: `${(step / TOTAL_STEPS) * 100}%` }}
+          <div className="mt-3 h-2 rounded-full bg-white/10 ring-1 ring-white/20">
+            <motion.div
+              initial={{ width: 0 }}
+              animate={{ width: `${(step / TOTAL_STEPS) * 100}%` }}
+              transition={{ duration: 0.5, ease: "easeOut" }}
+              className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 shadow-lg shadow-indigo-500/20"
             />
           </div>
         </div>
@@ -905,10 +992,9 @@ function StepOne({
   onGenerate,
   pagePlans,
   planApprovals,
-  expandedPlans,
+  expandedPlanIndex,
   onToggleExpand,
   onApprovePlan,
-  onUndoPlan,
   onChangePlan,
   onRegeneratePlan,
   regeneratingIndex,
@@ -923,10 +1009,11 @@ function StepOne({
   onGenerate: () => Promise<void>;
   pagePlans: string[];
   planApprovals: boolean[];
-  expandedPlans: boolean[];
+  expandedPlanIndex: number | null;
+  editingPlanIndex: number | null;
+  setEditingPlanIndex: (index: number | null) => void;
   onToggleExpand: (index: number) => void;
   onApprovePlan: (index: number) => void;
-  onUndoPlan: (index: number) => void;
   onChangePlan: (index: number, value: string) => void;
   onRegeneratePlan: (index: number) => Promise<void> | void;
   regeneratingIndex: number | null;
@@ -935,7 +1022,7 @@ function StepOne({
 }) {
   return (
     <div>
-      <h2 className="text-3xl font-semibold text-slate-50">
+      <h2 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-300 tracking-tight">
         What is this website about?
       </h2>
 
@@ -944,7 +1031,7 @@ function StepOne({
           value={topic}
           onChange={(event) => setTopic(event.target.value)}
           placeholder="Topic"
-          className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-slate-100"
+          className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-slate-100 backdrop-blur-lg focus:border-indigo-500/50 focus:ring-2 focus:ring-indigo-500/20 transition-all duration-300 outline-none"
         />
         <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
           <label className="text-sm text-slate-300">Pages</label>
@@ -973,7 +1060,7 @@ function StepOne({
         <div className="mt-6 space-y-3">
           {pagePlans.map((plan, index) => {
             const accepted = planApprovals[index];
-            const expanded = expandedPlans[index];
+            const isExpanded = expandedPlanIndex === index;
             const summary = summarizePlan(plan);
 
             return (
@@ -994,22 +1081,38 @@ function StepOne({
                       {summary}
                     </p>
                   </div>
-                  <span className="text-xs text-indigo-200">
-                    {expanded ? "Collapse" : "Expand"}
-                  </span>
+                  <motion.span
+                    animate={{ rotate: isExpanded ? 180 : 0 }}
+                    className="text-xs text-indigo-200"
+                  >
+                    {isExpanded ? "Collapse" : "Expand"}
+                  </motion.span>
                 </button>
 
-                {expanded && (
+                {isExpanded && (
                   <div className="mt-4 space-y-4">
-                    <label className="block text-xs uppercase tracking-[0.2em] text-slate-400">
-                      Plan details
-                    </label>
-                    <textarea
-                      value={plan}
-                      onChange={(event) => onChangePlan(index, event.target.value)}
-                      className="min-h-32 w-full rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none"
-                    />
-                    <PlanMarkup plan={plan} />
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                        Formatted plan
+                      </p>
+                      <div className="mt-3 rounded-xl border border-white/10 bg-black/60 p-4 text-sm text-slate-200">
+                        <PlanMarkup plan={plan} />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs uppercase tracking-[0.2em] text-slate-400">
+                        Revise plan
+                      </label>
+                      <textarea
+                        value={plan}
+                        onChange={(event) =>
+                          onChangePlan(index, event.target.value)
+                        }
+                        className="mt-2 min-h-32 w-full rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-slate-100 shadow-inner focus:border-indigo-400 focus:outline-none"
+                      />
+                    </div>
+
                     <div className="flex flex-wrap items-center gap-3">
                       <button
                         onClick={() => onApprovePlan(index)}
@@ -1020,7 +1123,7 @@ function StepOne({
                       </button>
                       {accepted && (
                         <button
-                          onClick={() => onUndoPlan(index)}
+                          onClick={() => onRegeneratePlan(index)}
                           className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs text-slate-200"
                         >
                           Undo
@@ -1031,7 +1134,9 @@ function StepOne({
                         disabled={regeneratingIndex === index}
                         className="rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3 py-1 text-xs text-indigo-200 disabled:opacity-60"
                       >
-                        {regeneratingIndex === index ? "Regenerating…" : "Regenerate"}
+                        {regeneratingIndex === index
+                          ? "Regenerating…"
+                          : "Regenerate"}
                       </button>
                       {accepted && (
                         <span className="inline-flex items-center gap-1 text-xs text-emerald-300">
@@ -1104,19 +1209,24 @@ function StepTwo({
 
         {pagePlans.length > 0 && (
           <p className="text-sm text-slate-400">
-            The live streaming console below tracks generation in real time. You can
-            detach it if you prefer a floating window.
+            The live streaming console below tracks generation in real time. You
+            can detach it if you prefer a floating window.
           </p>
         )}
 
         {layoutFragments && (
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <h3 className="text-lg font-semibold text-slate-100">Shared header & footer</h3>
+            <h3 className="text-lg font-semibold text-slate-100">
+              Shared header & footer
+            </h3>
             <p className="mt-1 text-xs text-slate-400">
-              Generated once and appended to every page for a consistent experience.
+              Generated once and appended to every page for a consistent
+              experience.
             </p>
             <details className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-slate-300">
-              <summary className="cursor-pointer text-indigo-200">Preview fragments</summary>
+              <summary className="cursor-pointer text-indigo-200">
+                Preview fragments
+              </summary>
               <div className="mt-3 space-y-3 whitespace-pre-wrap break-words">
                 <div>
                   <p className="font-semibold text-slate-200">Header</p>
@@ -1140,7 +1250,10 @@ function StepTwo({
             <h3 className="text-lg font-semibold text-slate-100">Artifacts</h3>
             <ul className="mt-2 space-y-1 text-sm text-slate-300">
               {files.map((file) => (
-                <li key={file.path} className="flex items-center justify-between gap-3">
+                <li
+                  key={file.path}
+                  className="flex items-center justify-between gap-3"
+                >
                   <span className="truncate">{file.path}</span>
                   <button
                     onClick={() => onPreview(file.path)}
@@ -1190,7 +1303,8 @@ function StepThree({
         Your site is ready ✨
       </h2>
       <p className="mt-2 text-sm text-slate-400">
-        Each page includes the shared header and footer for a cohesive experience.
+        Each page includes the shared header and footer for a cohesive
+        experience.
       </p>
 
       <div className="mt-6 flex flex-wrap gap-3">
@@ -1212,7 +1326,9 @@ function StepThree({
 
       {layoutFragments && (
         <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4">
-          <h3 className="text-lg font-semibold text-slate-100">Shared layout recap</h3>
+          <h3 className="text-lg font-semibold text-slate-100">
+            Shared layout recap
+          </h3>
           <p className="mt-1 text-xs text-slate-400">
             These fragments were appended to every HTML document.
           </p>
@@ -1242,7 +1358,10 @@ function StepThree({
           <h3 className="text-lg font-semibold text-slate-100">Pages</h3>
           <ul className="mt-2 space-y-1 text-sm text-slate-300">
             {files.map((file) => (
-              <li key={file.path} className="flex items-center justify-between gap-3">
+              <li
+                key={file.path}
+                className="flex items-center justify-between gap-3"
+              >
                 <span className="truncate">{file.path}</span>
                 <button
                   onClick={() => onPreview(file.path)}
@@ -1295,18 +1414,15 @@ function StreamConsole({
   onStopStreaming,
 }: StreamConsoleProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const dragState = useRef<
-    | {
-        mode: "move" | "resize";
-        startX: number;
-        startY: number;
-        originX: number;
-        originY: number;
-        originWidth: number;
-        originHeight: number;
-      }
-    | null
-  >(null);
+  const dragState = useRef<{
+    mode: "move" | "resize";
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    originWidth: number;
+    originHeight: number;
+  } | null>(null);
   function clampSize(width: number, height: number) {
     const minWidth = 320;
     const minHeight = 200;
@@ -1390,7 +1506,7 @@ function StreamConsole({
         left: position.x,
         width: size.width,
         height: size.height,
-        zIndex: 40,
+        zIndex: 50,
       }
     : {};
 
@@ -1413,7 +1529,9 @@ function StreamConsole({
         onPointerDown={(event) => startInteraction(event, "move")}
       >
         <div>
-          <h3 className="text-lg font-semibold text-slate-100">Live code stream</h3>
+          <h3 className="text-lg font-semibold text-slate-100">
+            Live code stream
+          </h3>
           <p className="text-xs text-slate-400">
             Monitor generation and stream any page on demand.
           </p>
@@ -1470,7 +1588,9 @@ function StreamConsole({
                         </span>
                       )}
                     </div>
-                    <p className="truncate text-xs text-slate-400">{descriptor}</p>
+                    <p className="truncate text-xs text-slate-400">
+                      {descriptor}
+                    </p>
                   </div>
                   <button
                     onClick={() => onStream(index)}
@@ -1495,11 +1615,20 @@ function StreamConsole({
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>
               Output
-              {activeStreamIndex !== null ? ` • Page ${activeStreamIndex + 1}` : ""}
+              {activeStreamIndex !== null
+                ? ` • Page ${activeStreamIndex + 1}`
+                : ""}
             </span>
             {isStreaming && <span className="text-indigo-200">Streaming…</span>}
           </div>
-          <pre className="max-h-60 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-4 text-[11px] leading-relaxed text-emerald-100 whitespace-pre-wrap">
+          <pre
+            ref={(el) => {
+              if (el && isStreaming) {
+                el.scrollTop = el.scrollHeight;
+              }
+            }}
+            className="max-h-60 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-4 text-[11px] leading-relaxed text-emerald-100 whitespace-pre-wrap scroll-smooth"
+          >
             {streamedCode || (isStreaming ? "Waiting for the model…" : "")}
           </pre>
         </div>
@@ -1521,7 +1650,11 @@ type SandboxPreviewProps = {
   onSelect: (path: string | null) => void;
 };
 
-function SandboxPreview({ files, selectedPath, onSelect }: SandboxPreviewProps) {
+function SandboxPreview({
+  files,
+  selectedPath,
+  onSelect,
+}: SandboxPreviewProps) {
   if (files.length === 0) {
     return null;
   }
@@ -1529,12 +1662,15 @@ function SandboxPreview({ files, selectedPath, onSelect }: SandboxPreviewProps) 
   const current = files.find((file) => file.path === selectedPath) ?? files[0];
 
   return (
-    <div className="mt-10 rounded-3xl border border-white/10 bg-white/5 p-6 shadow-[0px_20px_60px_rgba(0,0,0,0.35)]">
+    <div className="mt-10 rounded-3xl border border-white/10 bg-gradient-to-b from-slate-800/90 to-slate-900/95 backdrop-blur-xl p-6 shadow-[0px_20px_60px_rgba(0,0,0,0.35)] hover:shadow-indigo-500/10 transition-all duration-500">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-lg font-semibold text-slate-100">Sandbox preview</h3>
+          <h3 className="text-lg font-semibold text-slate-100">
+            Sandbox preview
+          </h3>
           <p className="text-xs text-slate-400">
-            Inspect any generated page in an isolated iframe without leaving the flow.
+            Inspect any generated page in an isolated iframe without leaving the
+            flow.
           </p>
         </div>
         <select
@@ -1550,13 +1686,41 @@ function SandboxPreview({ files, selectedPath, onSelect }: SandboxPreviewProps) 
         </select>
       </div>
 
-      <div className="mt-4 h-[420px] overflow-hidden rounded-2xl border border-white/10 bg-black/40">
+      <div className="mt-4 h-[420px] overflow-hidden rounded-2xl border border-white/10 bg-black/40 relative group">
         <iframe
           title={current?.path ?? "sandbox"}
           className="h-full w-full"
           sandbox="allow-same-origin allow-scripts"
           srcDoc={current?.content ?? ""}
         />
+        <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+          <button
+            onClick={() => {
+              const newWindow = window.open("", "_blank");
+              if (newWindow) {
+                newWindow.document.write(current?.content ?? "");
+                newWindow.document.close();
+              }
+            }}
+            className="rounded-full bg-black/60 p-2 text-white hover:bg-black/80 transition-colors duration-200"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="15 3 21 3 21 9"></polyline>
+              <line x1="10" y1="14" x2="21" y2="3"></line>
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   );
